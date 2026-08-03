@@ -6,6 +6,8 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions: {}
+
 jobs:
   zizmor:
     name: Zizmor - Security Analysis
@@ -27,21 +29,33 @@ jobs:
           tag: latest
 
       - name: Run zizmor
+        id: run-zizmor
         run: |
+          set +e
           echo "PATH: ${PATH}"
           echo "Checking for zizmor..."
           # The action installs to a cached location, check common paths
           if command -v zizmor >/dev/null 2>&1; then
-            zizmor .github/workflows
+            ZIZMOR_CMD="zizmor"
           elif [ -f "/opt/hostedtoolcache/zizmorcore/zizmor/latest/linux-x64/zizmor" ]; then
-            /opt/hostedtoolcache/zizmorcore/zizmor/latest/linux-x64/zizmor .github/workflows
+            ZIZMOR_CMD="/opt/hostedtoolcache/zizmorcore/zizmor/latest/linux-x64/zizmor"
           elif [ -f "${HOME}/.local/bin/zizmor" ]; then
-            "${HOME}/.local/bin/zizmor" .github/workflows
+            ZIZMOR_CMD="${HOME}/.local/bin/zizmor"
           elif [ -f "./zizmor" ]; then
-            ./zizmor .github/workflows
+            ZIZMOR_CMD="./zizmor"
           else
             echo "Error: zizmor binary not found"
             echo "Checking common installation paths..."
             find /opt/hostedtoolcache -name "zizmor" 2>/dev/null || true
             exit 1
           fi
+          "${ZIZMOR_CMD}" .github/workflows
+          human_exit=$?
+          "${ZIZMOR_CMD}" --format sarif .github/workflows > results.sarif
+          exit "${human_exit}"
+
+      - name: Upload SARIF results
+        if: always()
+        uses: github/codeql-action/upload-sarif@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
+        with:
+          sarif_file: results.sarif
