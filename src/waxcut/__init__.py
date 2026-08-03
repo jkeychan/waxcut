@@ -11,6 +11,8 @@ frames, so output is bit-identical to the source — just shorter.
     first_half = slice_bytes(stream.data, stream.frames, 0, cut_at)
 """
 
+from importlib.metadata import version as _version
+
 from waxcut.frames import (
     AudioStream,
     Frame,
@@ -23,7 +25,7 @@ from waxcut.frames import (
     total_duration_ms,
 )
 
-__version__ = "0.1.0"
+__version__ = _version("waxcut")
 
 __all__ = [
     "AudioStream",
