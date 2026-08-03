@@ -22,7 +22,7 @@ jobs:
 
       - name: Install ratchet
         id: install-ratchet
-        uses: jaxxstorm/action-install-gh-release@1e02892ca46fae0062342f787ed9d6dae25aedae
+        uses: jaxxstorm/action-install-gh-release@25e24d2d23ae098373794ef1d6faecb48ee52da8
         with:
           repo: sethvargo/ratchet
           tag: latest
