@@ -1,48 +1,24 @@
 # waxcut
 
+[![PyPI](https://img.shields.io/pypi/v/waxcut.svg)](https://pypi.org/project/waxcut/)
 [![CI](https://github.com/jkeychan/waxcut/actions/workflows/ci.yml/badge.svg)](https://github.com/jkeychan/waxcut/actions/workflows/ci.yml)
-[![Workflow Security and Linting](https://github.com/jkeychan/waxcut/actions/workflows/zizmor.yml/badge.svg)](https://github.com/jkeychan/waxcut/actions/workflows/zizmor.yml)
+[![Fuzzing](https://github.com/jkeychan/waxcut/actions/workflows/cflite_pr.yml/badge.svg)](https://github.com/jkeychan/waxcut/actions/workflows/cflite_pr.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jkeychan/waxcut/badge)](https://scorecard.dev/viewer/?uri=github.com/jkeychan/waxcut)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![Python](https://img.shields.io/pypi/pyversions/waxcut.svg)](pyproject.toml)
 
 Frame-accurate, lossless MP3 splitting and duration parsing in pure Python —
 no ffmpeg, no subprocess, no decode step.
 
 Cuts are made by parsing the file's own MPEG frame headers and byte-copying
-whole frames, so output is bit-identical to the source, just shorter. No
-audio decoding happens at all: not on the way in, not on the way out.
-
-## Why
-
-Most MP3-splitting tools shell out to `ffmpeg` or fully decode the file into
-PCM before re-encoding. Both work, but both are heavier than the actual
-problem requires: MP3 frames are self-describing, so their boundaries can be
-located directly from the byte stream and cut without touching the encoded
-audio at all. `waxcut` does that — a self-contained frame parser with no
-runtime dependencies and no external binary.
-
-It also handles the parts that make naive frame-splitting subtly wrong:
-- Skips leading `ID3v2` tags when scanning for the first frame.
-- Recognizes and excludes the `Xing`/`Info`/`VBRI` VBR header frame, which is
-  encoder metadata, not audio — including it in output or duration
-  calculations corrupts both.
-- Parses LAME's gapless-playback delay/padding extension, so the reported
-  duration matches what a real player shows, not just the raw frame count.
-
-Duration parsing is cross-validated against
-[mutagen](https://github.com/quodlibet/mutagen)'s independent implementation
-to the millisecond across a range of real-world encoded files (see
-[Testing](#testing)).
+whole frames: output is bit-identical to the source, just shorter.
 
 ## Install
 
-Not yet published to PyPI. For now, install directly from GitHub:
-
 ```bash
-uv add git+https://github.com/jkeychan/waxcut
+pip install waxcut
 # or
-pip install git+https://github.com/jkeychan/waxcut
+uv add waxcut
 ```
 
 ## Usage
@@ -63,11 +39,29 @@ Path("part1.mp3").write_bytes(first_half)
 Path("part2.mp3").write_bytes(second_half)
 ```
 
+## Why not ffmpeg or a decode/re-encode library?
+
+MP3 frames are self-describing, so their boundaries can be found directly
+from the byte stream — no decode step, no re-encode step, no external
+binary to shell out to.
+
+waxcut also handles the parts that make naive frame-splitting subtly wrong:
+
+- Skips leading `ID3v2` tags when scanning for the first frame.
+- Excludes the `Xing`/`Info`/`VBRI` VBR header frame — encoder metadata, not
+  audio, and including it corrupts both output and duration.
+- Parses LAME's gapless delay/padding extension, so reported duration
+  matches what a real player shows, not just the raw frame count.
+
+Duration parsing is cross-validated against
+[mutagen](https://github.com/quodlibet/mutagen)'s independent implementation
+to the millisecond (see [Testing](#testing)).
+
 ## Scope
 
-`waxcut` parses **MPEG-1/2/2.5 Audio Layer III** — what "MP3" actually means.
-Layer I/II frames are explicitly rejected (`UnsupportedMp3Error`) rather than
-silently mishandled, since virtually no real-world "MP3" file uses them.
+Parses **MPEG-1/2/2.5 Audio Layer III** — what "MP3" actually means. Layer
+I/II frames raise `UnsupportedMp3Error` rather than being silently
+mishandled, since virtually no real-world "MP3" file uses them.
 
 ## Testing
 
@@ -76,12 +70,11 @@ uv sync
 uv run pytest tests/ -v
 ```
 
-The suite validates frame parsing against mutagen's independent MP3 parser
-(duration must match exactly, including LAME gapless delay/padding) across
-CBR/VBR, mono/stereo, and multiple encoder tags — including a regression
-test for misreading a non-LAME encoder's metadata as if it were LAME's
-gapless fields. Where `ffmpeg`/`ffprobe` are available, every split output
-is independently decoded to confirm it's a valid, playable file.
+Validated against mutagen's independent parser (duration must match
+exactly, including LAME gapless delay/padding) across CBR/VBR, mono/stereo,
+and multiple encoder tags. Where `ffmpeg`/`ffprobe` are available, every
+split output is independently decoded to confirm it's valid. Fuzzed
+continuously with [ClusterFuzzLite](.clusterfuzzlite/).
 
 ## Contributing
 
