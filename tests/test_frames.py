@@ -1,3 +1,4 @@
+import itertools
 import shutil
 import subprocess
 from pathlib import Path
@@ -54,7 +55,7 @@ def test_split_output_is_valid_mp3(fixture_path, tmp_path):
     points = [duration / 3, 2 * duration / 3]
     idxs = [0, *[waxcut.frame_index_at(stream.frames, p) for p in points], len(stream.frames)]
 
-    for i, (start, end) in enumerate(zip(idxs, idxs[1:])):
+    for i, (start, end) in enumerate(itertools.pairwise(idxs)):
         if start >= end:
             continue
         out_path = tmp_path / f"part{i}.mp3"
@@ -62,7 +63,9 @@ def test_split_output_is_valid_mp3(fixture_path, tmp_path):
 
         result = subprocess.run(
             ["ffmpeg", "-v", "error", "-i", str(out_path), "-f", "null", "-"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         assert result.returncode == 0
         assert result.stderr == ""
