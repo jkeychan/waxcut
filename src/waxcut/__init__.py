@@ -11,6 +11,7 @@ frames, so output is bit-identical to the source — just shorter.
     first_half = slice_bytes(stream.data, stream.frames, 0, cut_at)
 """
 
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
 from waxcut.frames import (
@@ -25,7 +26,14 @@ from waxcut.frames import (
     total_duration_ms,
 )
 
-__version__ = _version("waxcut")
+try:
+    __version__ = _version("waxcut")
+except PackageNotFoundError:
+    # No installed-package metadata to read from — e.g. inside a frozen/
+    # bundled executable (PyInstaller, as used by our own fuzz harness).
+    # Obviously-wrong sentinel rather than a hardcoded number that would
+    # silently drift out of sync with pyproject.toml on every release.
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "AudioStream",
