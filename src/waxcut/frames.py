@@ -67,15 +67,18 @@ class Frame:
     duration_ms: float
 
 
+_ID3V2_HEADER_SIZE = 10
+
+
 def id3v2_size(data: bytes) -> int:
     """Return the byte length of a leading ID3v2 tag, or 0 if there isn't one."""
-    if len(data) < 10 or data[:3] != b"ID3":
+    if len(data) < _ID3V2_HEADER_SIZE or data[:3] != b"ID3":
         return 0
     # Tag size is a 4-byte syncsafe integer (7 significant bits per byte).
     size = 0
     for byte in data[6:10]:
         size = (size << 7) | (byte & 0x7F)
-    return 10 + size
+    return _ID3V2_HEADER_SIZE + size
 
 
 def _parse_header(data: bytes, offset: int) -> tuple[float, int, int, int] | None:
@@ -107,10 +110,13 @@ def _frame_length(version: float, bitrate_kbps: int, sample_rate: int, padding: 
     return int(coefficient * bitrate_kbps * 1000 / sample_rate) + padding
 
 
+_CHANNEL_MODE_MONO = 0b11
+
+
 def _is_mono(data: bytes, offset: int) -> bool:
     header = struct.unpack_from(">I", data, offset)[0]
     channel_mode = (header >> 6) & 0b11
-    return channel_mode == 0b11
+    return channel_mode == _CHANNEL_MODE_MONO
 
 
 def _vbr_header_tag_offset(data: bytes, frame: Frame, version: float) -> int | None:
@@ -121,6 +127,10 @@ def _vbr_header_tag_offset(data: bytes, frame: Frame, version: float) -> int | N
         return None
     tag = data[frame.offset + tag_start : frame.offset + tag_start + 4]
     return tag_start if tag in _VBR_HEADER_TAGS else None
+
+
+_LAME_DELAY_PADDING_SIZE = 3  # bytes holding two packed 12-bit fields
+_TWELVE_BIT_FIELD_LIMIT = 4096
 
 
 def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
@@ -145,12 +155,12 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
         return None
 
     delay_padding = data[lame_start + 21 : lame_start + 24]
-    if len(delay_padding) != 3:
+    if len(delay_padding) != _LAME_DELAY_PADDING_SIZE:
         return None
     delay = (delay_padding[0] << 4) | (delay_padding[1] >> 4)
     padding = ((delay_padding[1] & 0x0F) << 8) | delay_padding[2]
 
-    if not (0 <= delay < 4096 and 0 <= padding < 4096):
+    if not (0 <= delay < _TWELVE_BIT_FIELD_LIMIT and 0 <= padding < _TWELVE_BIT_FIELD_LIMIT):
         return None
     return delay, padding
 
