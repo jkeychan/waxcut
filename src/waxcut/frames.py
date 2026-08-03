@@ -44,7 +44,14 @@ _SAMPLES_PER_FRAME = {1: 1152, 2: 576, 2.5: 576}
 
 # (version, mono) -> side info size in bytes, i.e. where a Xing/Info/VBRI
 # tag (if present) starts relative to the frame's own offset.
-_SIDE_INFO_SIZE = {(1, False): 32, (1, True): 17, (2, False): 17, (2, True): 9, (2.5, False): 17, (2.5, True): 9}
+_SIDE_INFO_SIZE = {
+    (1, False): 32,
+    (1, True): 17,
+    (2, False): 17,
+    (2, True): 9,
+    (2.5, False): 17,
+    (2.5, True): 9,
+}
 _VBR_HEADER_TAGS = (b"Xing", b"Info", b"VBRI")
 
 
@@ -112,7 +119,7 @@ def _vbr_header_tag_offset(data: bytes, frame: Frame, version: float) -> int | N
     tag_start = 4 + side_info
     if frame.offset + tag_start + 4 > len(data):
         return None
-    tag = data[frame.offset + tag_start: frame.offset + tag_start + 4]
+    tag = data[frame.offset + tag_start : frame.offset + tag_start + 4]
     return tag_start if tag in _VBR_HEADER_TAGS else None
 
 
@@ -128,7 +135,7 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
     lame_start = pos
     if lame_start + 24 > len(data):
         return None
-    version_string = data[lame_start: lame_start + 9]
+    version_string = data[lame_start : lame_start + 9]
     # Only genuine LAME encodes reliably populate the extended gapless
     # delay/padding fields in this layout — other encoders (e.g. ffmpeg's
     # native "Lavc..." tag) use the same Xing/Info header but not this
@@ -137,7 +144,7 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
     if not version_string.startswith(b"LAME"):
         return None
 
-    delay_padding = data[lame_start + 21: lame_start + 24]
+    delay_padding = data[lame_start + 21 : lame_start + 24]
     if len(delay_padding) != 3:
         return None
     delay = (delay_padding[0] << 4) | (delay_padding[1] >> 4)
@@ -246,7 +253,12 @@ def load_audio_stream(path: Path) -> AudioStream:
     # The Xing/Info/VBRI frame is encoder metadata, not audio: drop it and
     # rebase remaining frames so start_ms=0 is the first real audio frame.
     rebased = [
-        Frame(offset=f.offset, length=f.length, start_ms=f.start_ms - first.duration_ms, duration_ms=f.duration_ms)
+        Frame(
+            offset=f.offset,
+            length=f.length,
+            start_ms=f.start_ms - first.duration_ms,
+            duration_ms=f.duration_ms,
+        )
         for f in raw_frames[1:]
     ]
     if not rebased:

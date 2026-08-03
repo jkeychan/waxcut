@@ -37,8 +37,12 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff]
+line-length = 110
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "mutagen>=1.48.1",
+    "ruff>=0.16.1",
 ]

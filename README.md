@@ -83,6 +83,12 @@ test for misreading a non-LAME encoder's metadata as if it were LAME's
 gapless fields. Where `ffmpeg`/`ffprobe` are available, every split output
 is independently decoded to confirm it's a valid, playable file.
 
+## Contributing
+
+Bug reports and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
+for the dev setup and PR process. Report security vulnerabilities per
+[SECURITY.md](SECURITY.md) rather than as public issues.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
