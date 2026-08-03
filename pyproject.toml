@@ -40,6 +40,33 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 110
 
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "B",        # bugbear (likely-bug patterns)
+    "UP",       # pyupgrade (modern syntax)
+    "SIM",      # simplify
+    "I",        # isort
+    "N",        # naming conventions
+    "C4",       # comprehensions
+    "RUF",      # ruff-specific
+    "S",        # bandit (security)
+    "PL",       # pylint
+    "PERF",     # performance
+    "PTH",      # prefer pathlib over os.path
+    "A",        # builtin shadowing
+    "ARG",      # unused arguments
+    "T20",      # no stray print()
+    "ERA",      # no commented-out code
+]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest tests work, not a production runtime-check anti-pattern;
+# the fixed, hardcoded ffmpeg invocation isn't untrusted input; expected byte
+# counts in test fixtures are concrete values, not magic numbers to name.
+"tests/*" = ["S101", "S603", "S607", "PLR2004"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

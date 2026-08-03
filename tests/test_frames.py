@@ -27,14 +27,14 @@ def test_duration_matches_mutagen(fixture_path):
 
 def test_frames_are_contiguous(fixture_path):
     stream = waxcut.load_audio_stream(fixture_path)
-    for prev, curr in zip(stream.frames, stream.frames[1:]):
+    for prev, curr in zip(stream.frames, stream.frames[1:], strict=False):
         assert curr.offset == prev.offset + prev.length
 
 
 def test_frame_start_ms_is_monotonic_and_starts_at_zero(fixture_path):
     stream = waxcut.load_audio_stream(fixture_path)
     assert stream.frames[0].start_ms == 0
-    for prev, curr in zip(stream.frames, stream.frames[1:]):
+    for prev, curr in zip(stream.frames, stream.frames[1:], strict=False):
         assert curr.start_ms > prev.start_ms
 
 
