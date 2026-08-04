@@ -21,8 +21,10 @@ from waxcut.frames import (
     frame_index_at,
     id3v2_size,
     iter_frames,
+    join_frames,
     load_audio_stream,
     slice_bytes,
+    split_at,
     total_duration_ms,
 )
 
@@ -42,7 +44,9 @@ __all__ = [
     "frame_index_at",
     "id3v2_size",
     "iter_frames",
+    "join_frames",
     "load_audio_stream",
     "slice_bytes",
+    "split_at",
     "total_duration_ms",
 ]

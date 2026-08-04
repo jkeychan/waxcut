@@ -122,3 +122,42 @@ REGRESSION_FIXTURES = Path(__file__).parent / "fixtures" / "regression"
 def test_regression_corpus_does_not_crash(regression_file):
     with contextlib.suppress(waxcut.UnsupportedMp3Error):
         waxcut.iter_frames(regression_file.read_bytes())
+
+
+def test_split_at_matches_manual_frame_index_at_and_slice_bytes(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    cut_at = stream.playable_duration_ms / 2
+
+    segments = waxcut.split_at(stream, [cut_at])
+
+    idx = waxcut.frame_index_at(stream.frames, cut_at)
+    expected = [
+        waxcut.slice_bytes(stream.data, stream.frames, 0, idx),
+        waxcut.slice_bytes(stream.data, stream.frames, idx, len(stream.frames)),
+    ]
+    assert segments == expected
+
+
+def test_split_at_no_timestamps_returns_whole_stream_as_one_segment(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    (segment,) = waxcut.split_at(stream, [])
+    assert segment == waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+
+
+def test_split_at_out_of_order_timestamps_produces_empty_segment(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    duration = stream.playable_duration_ms
+    segments = waxcut.split_at(stream, [duration * 0.75, duration * 0.25])
+    assert segments[1] == b""
+
+
+def test_join_frames_reverses_split_at(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+    duration = stream.playable_duration_ms
+    segments = waxcut.split_at(stream, [duration * 0.3, duration * 0.6])
+    assert waxcut.join_frames(segments) == whole
+
+
+def test_join_frames_empty_list_returns_empty_bytes():
+    assert waxcut.join_frames([]) == b""

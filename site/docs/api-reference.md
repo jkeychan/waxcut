@@ -164,6 +164,46 @@ silently wrapping to an unintended frame the way Python's own negative
 indexing would. Positive out-of-range indices surface as a normal Python
 `IndexError` from indexing `frames[start_idx]` or `frames[end_idx - 1]`.
 
+## `split_at`
+
+```python
+def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]
+```
+
+Convenience wrapper around [`frame_index_at`](#frame_index_at) +
+[`slice_bytes`](#slice_bytes) for the common case of cutting at several
+timestamps in one call, instead of looping manually.
+
+**Args**
+- `stream` (`AudioStream`) — from `load_audio_stream`.
+- `timestamps_ms` (`list[float]`) — desired cut points, in milliseconds.
+  Need not be sorted or in range — each is clamped by `frame_index_at`, so
+  an out-of-order or duplicate timestamp simply produces an empty segment
+  at that position rather than raising.
+
+**Returns**
+- `list[bytes]` — `len(timestamps_ms) + 1` segments, in order. Each is a
+  standalone, decodable MP3 stream. Concatenating all of them (see
+  [`join_frames`](#join_frames)) reproduces the original audio exactly.
+
+## `join_frames`
+
+```python
+def join_frames(segments: list[bytes]) -> bytes
+```
+
+Concatenates frame-aligned MP3 byte segments back into one stream. Safe
+because MPEG Layer III frames are self-delimited — each carries its own
+length in its header — so concatenation always reproduces the original
+bytes exactly, with no re-parsing or re-alignment needed.
+
+**Args**
+- `segments` (`list[bytes]`) — byte segments to join, in order, as
+  produced by `slice_bytes` or `split_at`.
+
+**Returns**
+- `bytes` — the concatenated result.
+
 ## `total_duration_ms`
 
 ```python
