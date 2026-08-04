@@ -12,8 +12,11 @@ http://www.mp3-tech.org/programmer/frame_header.html
 
 from __future__ import annotations
 
+import bisect
 import math
 import struct
+from array import array
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -72,13 +75,14 @@ class UnsupportedMp3Error(ValueError):
 
 
 # A crafted file packed with minimum-size frames (as little as ~24 bytes
-# each for MPEG2/2.5 Layer III) parses in linear time but produces one Frame
-# object per frame -- real measurements show ~6x memory amplification over
-# input size. Unbounded, that's a cheap CPU/memory amplification lever for
-# anyone feeding untrusted "MP3" input to this library. 250 MB comfortably
-# covers legitimate use (even multi-hour, high-bitrate recordings) while
-# keeping worst-case parse time and memory on a single call bounded. See
-# SECURITY.md for the full threat-model note.
+# each for MPEG2/2.5 Layer III) parses in linear time. Frames' compact
+# array-backed storage keeps memory amplification near 1x even for such a
+# file (measured; see SECURITY.md) -- it was ~6x before that redesign
+# (Frame objects boxed per-frame). This limit now exists to bound the
+# absolute worst-case time/memory of a single call, not to guard against
+# amplification specifically: 250 MB comfortably covers legitimate use
+# (even multi-hour, high-bitrate recordings) while keeping a single call's
+# cost bounded. See SECURITY.md for the full threat-model note.
 _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
 
 
@@ -112,6 +116,77 @@ class Frame:
     length: int
     start_ms: float
     duration_ms: float
+
+
+class Frames(Sequence["Frame"]):
+    """A memory-compact, lazily-materialized sequence of Frame.
+
+    Backed by four parallel array.array buffers (packed, unboxed values)
+    instead of a list of Frame objects -- ~24 bytes/frame vs. ~168
+    bytes/frame for an equivalent list[Frame], since no per-frame Python
+    object or boxed int/float is allocated until you actually index into
+    it. Supports the same operations a list[Frame] does: len(), positive
+    and negative indexing, slicing (returns another Frames, sharing the
+    same backing arrays -- slicing never copies), and iteration.
+
+    Not constructed directly by callers -- returned by scan_frames and
+    found on AudioStream.frames.
+    """
+
+    __slots__ = ("_duration_ms", "_lengths", "_offsets", "_start", "_start_ms", "_start_ms_bias", "_stop")
+
+    def __init__(self, offsets: array, lengths: array, start_ms: array, duration_ms: array) -> None:
+        self._offsets = offsets
+        self._lengths = lengths
+        self._start_ms = start_ms
+        self._duration_ms = duration_ms
+        self._start = 0
+        self._stop = len(offsets)
+        self._start_ms_bias = 0.0
+
+    @classmethod
+    def _view(cls, base: Frames, start: int, stop: int, start_ms_bias: float) -> Frames:
+        """Construct a Frames sharing base's backing arrays, bypassing __init__."""
+        view = object.__new__(cls)
+        view._offsets = base._offsets
+        view._lengths = base._lengths
+        view._start_ms = base._start_ms
+        view._duration_ms = base._duration_ms
+        view._start = start
+        view._stop = stop
+        view._start_ms_bias = start_ms_bias
+        return view
+
+    def __len__(self) -> int:
+        return self._stop - self._start
+
+    def _frame_at(self, real_index: int) -> Frame:
+        return Frame(
+            offset=self._offsets[real_index],
+            length=self._lengths[real_index],
+            start_ms=self._start_ms[real_index] - self._start_ms_bias,
+            duration_ms=self._duration_ms[real_index],
+        )
+
+    def __getitem__(self, index: int | slice) -> Frame | Frames:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            if step != 1:
+                raise ValueError("Frames slicing does not support a step")
+            return Frames._view(self, self._start + start, self._start + stop, self._start_ms_bias)
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError("Frames index out of range")
+        return self._frame_at(self._start + index)
+
+    def __iter__(self) -> Iterator[Frame]:
+        for i in range(self._start, self._stop):
+            yield self._frame_at(i)
+
+    def rebase(self, offset_ms: float) -> Frames:
+        """A view with every start_ms reduced by offset_ms, without copying."""
+        return Frames._view(self, self._start, self._stop, self._start_ms_bias + offset_ms)
 
 
 _ID3V2_HEADER_SIZE = 10
@@ -228,7 +303,7 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
     return delay, padding
 
 
-def scan_frames(data: bytes) -> list[Frame]:
+def scan_frames(data: bytes) -> Frames:
     """Scan raw MP3 bytes and return every located frame, in order.
 
     Skips a leading ID3v2 tag if present. Includes the Xing/Info/VBRI
@@ -242,25 +317,27 @@ def scan_frames(data: bytes) -> list[Frame]:
             the tested and expected case.
 
     Returns:
-        Frames in file order, each with byte offset/length and cumulative
-        start_ms/duration_ms.
+        A Frames sequence in file order, each with byte offset/length and
+        cumulative start_ms/duration_ms. Behaves like list[Frame] (len(),
+        indexing, negative indexing, slicing, iteration) but is backed by
+        compact packed arrays rather than one Python object per frame.
 
     Raises:
         UnsupportedMp3Error: No valid MPEG-1/2/2.5 Layer III frame was
             found anywhere in `data`. This is the correct outcome for
             non-MP3 files, empty input, and Layer I/II files (rejected
             on purpose — see module docstring).
-        FileTooLargeError: `data` exceeds 250 MB. A minimum-size-frame file
-            parses in linear time but produces one Frame object per frame —
-            unbounded, that's a cheap CPU/memory amplification lever for
-            untrusted input. See SECURITY.md.
+        FileTooLargeError: `data` exceeds 250 MB. See SECURITY.md.
     """
     if len(data) > _MAX_FILE_SIZE_BYTES:
         raise FileTooLargeError(
             f"Input is {len(data)} bytes, exceeding the {_MAX_FILE_SIZE_BYTES}-byte (250 MB) limit."
         )
     offset = id3v2_size(data)
-    frames: list[Frame] = []
+    offsets: array = array("I")
+    lengths: array = array("I")
+    start_ms_values: array = array("d")
+    duration_ms_values: array = array("d")
     cursor_ms = 0.0
 
     while offset < len(data):
@@ -281,22 +358,27 @@ def scan_frames(data: bytes) -> list[Frame]:
         duration_ms = samples / sample_rate * 1000
 
         # start_ms is deliberately an accumulated running total, not
-        # `len(frames) * duration_ms`: this function must tolerate malformed
+        # `len(offsets) * duration_ms`: this function must tolerate malformed
         # or adversarial input (see the fuzz harness), where a byte sequence
         # a few frames in could spuriously resync at a different apparent
         # version/sample_rate. Accumulating each frame's own duration keeps
         # start_ms correct per-frame even then; assuming a single constant
-        # duration for the whole file would not.
-        frames.append(Frame(offset=offset, length=length, start_ms=cursor_ms, duration_ms=duration_ms))
+        # duration for the whole file would not. Storing start_ms/duration_ms
+        # per-frame (rather than deriving them from index * a constant) is
+        # for the same reason.
+        offsets.append(offset)
+        lengths.append(length)
+        start_ms_values.append(cursor_ms)
+        duration_ms_values.append(duration_ms)
         cursor_ms += duration_ms
         offset += length
 
-    if not frames:
+    if not offsets:
         raise UnsupportedMp3Error("No valid MPEG audio frames found.")
-    return frames
+    return Frames(offsets, lengths, start_ms_values, duration_ms_values)
 
 
-def total_duration_ms(frames: list[Frame]) -> float:
+def total_duration_ms(frames: Sequence[Frame]) -> float:
     """Total playback duration spanned by `frames`, in milliseconds.
 
     Args:
@@ -315,7 +397,7 @@ def total_duration_ms(frames: list[Frame]) -> float:
     return last.start_ms + last.duration_ms
 
 
-def frame_index_at(frames: list[Frame], target_ms: float) -> int:
+def frame_index_at(frames: Sequence[Frame], target_ms: float) -> int:
     """Index of the last frame starting at or before `target_ms`.
 
     This is how you turn a "cut at N milliseconds" request into a frame
@@ -324,7 +406,7 @@ def frame_index_at(frames: list[Frame], target_ms: float) -> int:
     the requested time.
 
     Args:
-        frames: A non-empty list of Frame, as returned by scan_frames or
+        frames: A non-empty sequence of Frame, as returned by scan_frames or
             found on AudioStream.frames.
         target_ms: Desired split point in milliseconds. Values below the
             first frame's start_ms clamp to index 0; values at or beyond
@@ -341,15 +423,17 @@ def frame_index_at(frames: list[Frame], target_ms: float) -> int:
         raise ValueError("frame_index_at() requires a non-empty frame list")
     if math.isnan(target_ms):
         raise ValueError("frame_index_at() requires a non-NaN target_ms")
-    idx = 0
-    for i, frame in enumerate(frames):
-        if frame.start_ms > target_ms:
-            break
-        idx = i
-    return idx
+    # Binary search rather than a linear scan: start_ms is always strictly
+    # increasing (duration_ms -- samples / sample_rate -- is always
+    # positive), so this touches O(log n) frames instead of O(n). That
+    # matters more than it used to: indexing into a Frames constructs a
+    # Frame on demand, so a linear scan over a large file would construct
+    # one per frame just to check start_ms.
+    idx = bisect.bisect_right(frames, target_ms, key=lambda frame: frame.start_ms) - 1
+    return max(idx, 0)
 
 
-def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) -> bytes:
+def slice_bytes(data: bytes, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes:
     """Byte range covering frames[start_idx:end_idx], contiguous.
 
     This is a plain byte-copy, not a re-parse: frames are assumed
@@ -393,8 +477,8 @@ class AudioStream:
 
     Attributes:
         data: The complete file bytes this AudioStream was parsed from.
-        frames: List of located MPEG Layer III frames, in file order,
-            excluding any VBR header frame. start_ms of the first frame is 0.
+        frames: Located MPEG Layer III frames, in file order, excluding any
+            VBR header frame. start_ms of the first frame is 0.
         encoder_delay_samples: Gapless playback trim from a LAME encoder tag,
             in samples at the stream's own sample rate — informational only.
             Frame boundaries (and therefore where splits can land) are
@@ -409,7 +493,7 @@ class AudioStream:
     """
 
     data: bytes
-    frames: list[Frame]
+    frames: Frames
     encoder_delay_samples: int
     encoder_padding_samples: int
     sample_rate: int
@@ -474,15 +558,9 @@ def load_audio_stream(path: Path) -> AudioStream:
 
     # The Xing/Info/VBRI frame is encoder metadata, not audio: drop it and
     # rebase remaining frames so start_ms=0 is the first real audio frame.
-    rebased = [
-        Frame(
-            offset=f.offset,
-            length=f.length,
-            start_ms=f.start_ms - first.duration_ms,
-            duration_ms=f.duration_ms,
-        )
-        for f in raw_frames[1:]
-    ]
+    # .rebase() is O(1) -- a view over the same backing arrays with an
+    # adjusted start_ms bias, not a rebuild of every remaining Frame.
+    rebased = raw_frames[1:].rebase(first.duration_ms)
     if not rebased:
         raise UnsupportedMp3Error("File contains only a VBR header frame, no audio.")
     return AudioStream(data, rebased, delay, padding, sample_rate)

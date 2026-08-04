@@ -8,16 +8,17 @@ security fixes.
 ## Resource limits
 
 `scan_frames`/`load_audio_stream` reject input over 250 MB, raising
-`FileTooLargeError`. A file packed with minimum-size MPEG2/2.5 Layer III
-frames (~24 bytes each) parses without crashing but produces one `Frame`
-object per frame — measured directly, a 10 MB adversarial file produces
-~58 MB of `Frame` objects, and that scales linearly. Unbounded, that's a
-cheap CPU/memory amplification lever for any service that accepts
-user-uploaded "MP3" files and parses them without its own size limit.
-`load_audio_stream` checks the file's size on disk before reading it, so
-an oversized file is never fully loaded into memory. See the
+`FileTooLargeError`. `load_audio_stream` checks the file's size on disk
+before reading it, so an oversized file is never fully loaded into memory.
+
+A file packed with minimum-size MPEG2/2.5 Layer III frames (~24 bytes each)
+parses without crashing, at a rate proportional to input size — the 250 MB
+limit bounds that worst case. Located frames are stored in compact packed
+arrays (not individually-allocated objects), measured at ~0.95x memory
+amplification over input size for an adversarial 10 MB file built this way
+— previously ~6x before that storage redesign. See the
 [docs site's Security page](https://waxcut.pages.dev/docs/security#resource-limits)
-for the full writeup.
+for the full writeup and measurement methodology.
 
 ## Reporting a Vulnerability
 
