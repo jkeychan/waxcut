@@ -16,7 +16,7 @@ const config: Config = {
   },
 
   // Set the production url of your site here
-  url: 'https://waxcut.netlify.app',
+  url: 'https://waxcut.pages.dev',
   // Set the /<baseUrl>/ pathname under which your site is served
   baseUrl: '/',
 

@@ -10,5 +10,5 @@ site/node_modules/
 site/build/
 site/.docusaurus/
 
-# Local Netlify folder
-.netlify
+# Local Cloudflare Pages (wrangler) folder
+site/.wrangler/
