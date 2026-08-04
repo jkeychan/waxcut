@@ -46,7 +46,7 @@ frame starts at 0, and — if the header carries a LAME gapless extension —
 @dataclass(frozen=True)
 class AudioStream:
     data: bytes
-    frames: list[Frame]
+    frames: Frames
     encoder_delay_samples: int
     encoder_padding_samples: int
     sample_rate: int
@@ -58,10 +58,12 @@ directly.
 
 **Fields**
 - `data` (`bytes`) — the complete file bytes this stream was parsed from.
-- `frames` (`list[Frame]`) — the located frames, in file order. If the
-  source file had a Xing/Info/VBRI VBR header frame, it has already been
-  excluded here, and the remaining frames rebased so the first one has
-  `start_ms == 0`.
+- `frames` (`Frames`) — the located frames, in file order, as a
+  memory-compact sequence (see [`Frames`](#frames)) that behaves like
+  `list[Frame]` — indexing, negative indexing, slicing, iteration, `len()`
+  all work the same way. If the source file had a Xing/Info/VBRI VBR header
+  frame, it has already been excluded here, and the remaining frames
+  rebased so the first one has `start_ms == 0`.
 - `encoder_delay_samples` (`int`) — samples of encoder padding at the start
   of the audio, read from a LAME gapless tag if one was present; `0`
   otherwise. Informational only: it does not affect frame boundaries or
@@ -111,10 +113,29 @@ One located MPEG Layer III frame, as produced by
 - `duration_ms` (`float`) — this frame's own playback duration, in
   milliseconds.
 
+## `Frames`
+
+```python
+class Frames(Sequence[Frame])
+```
+
+The type returned by [`scan_frames`](#scan_frames) and found on
+`AudioStream.frames`. Behaves like `list[Frame]` — `len()`, positive and
+negative indexing, slicing, and iteration all work the same way — but is
+backed by four packed `array.array` buffers rather than one Python object
+per frame: indexing/iterating constructs a [`Frame`](#frame) on demand
+instead of every frame being pre-allocated up front. Measured at ~24
+bytes/frame vs. ~168 bytes/frame for an equivalent `list[Frame]` — see
+[Security](./security.md#resource-limits) for why this matters and the
+real numbers behind it.
+
+Slicing returns another `Frames` sharing the same backing arrays — it
+never copies. Not constructed directly by callers.
+
 ## `frame_index_at`
 
 ```python
-def frame_index_at(frames: list[Frame], target_ms: float) -> int
+def frame_index_at(frames: Sequence[Frame], target_ms: float) -> int
 ```
 
 Returns the index of the last frame in `frames` that starts at or before
@@ -124,8 +145,8 @@ land on a frame's own start, so this snaps to the nearest one at or before
 the requested time.
 
 **Args**
-- `frames` (`list[Frame]`) — frame list, e.g. from `scan_frames` or
-  `AudioStream.frames`.
+- `frames` (`Sequence[Frame]`) — e.g. a `Frames` from `scan_frames` or
+  `AudioStream.frames`, or a plain `list[Frame]`.
 - `target_ms` (`float`) — desired split point in milliseconds.
 
 **Returns**
@@ -141,7 +162,7 @@ last frame index instead of erroring.)
 ## `slice_bytes`
 
 ```python
-def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) -> bytes
+def slice_bytes(data: bytes, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes
 ```
 
 Returns the raw bytes covering `frames[start_idx:end_idx]` as one
@@ -153,8 +174,7 @@ corresponding span of the original file.
 
 **Args**
 - `data` (`bytes`) — the same bytes `frames` was derived from.
-- `frames` (`list[Frame]`) — frame list from `scan_frames` or
-  `AudioStream.frames`.
+- `frames` (`Sequence[Frame]`) — from `scan_frames` or `AudioStream.frames`.
 - `start_idx` (`int`) — first frame index to include (inclusive).
 - `end_idx` (`int`) — one past the last frame index to include (exclusive)
   — standard Python slice semantics.
@@ -212,29 +232,28 @@ bytes exactly, with no re-parsing or re-alignment needed.
 ## `total_duration_ms`
 
 ```python
-def total_duration_ms(frames: list[Frame]) -> float
+def total_duration_ms(frames: Sequence[Frame]) -> float
 ```
 
 Total playback duration spanned by `frames`, in milliseconds — the last
 frame's `start_ms` plus its `duration_ms`.
 
 **Args**
-- `frames` (`list[Frame]`) — a non-empty list of `Frame`, as returned by
-  `scan_frames`.
+- `frames` (`Sequence[Frame]`) — non-empty, as returned by `scan_frames`.
 
 **Returns**
 - `float`
 
 **Raises**
-- `IndexError` — `frames` is empty (`frames[-1]` on an empty list).
-  `scan_frames` itself never returns an empty list — it raises
+- `IndexError` — `frames` is empty (`frames[-1]` on an empty sequence).
+  `scan_frames` itself never returns an empty `Frames` — it raises
   `UnsupportedMp3Error` instead — so this only happens if you pass in an
-  empty list you constructed or filtered yourself.
+  empty sequence you constructed or filtered yourself.
 
 ## `scan_frames`
 
 ```python
-def scan_frames(data: bytes) -> list[Frame]
+def scan_frames(data: bytes) -> Frames
 ```
 
 Scans `data` for MPEG Layer III audio frames, skipping any leading ID3v2
@@ -256,7 +275,7 @@ not `scan_frames`'s.
 - `data` (`bytes`) — raw file bytes.
 
 **Returns**
-- `list[Frame]` — never empty.
+- [`Frames`](#frames) — never empty.
 
 **Raises**
 - `UnsupportedMp3Error` — no valid MPEG Layer III frame was found anywhere
