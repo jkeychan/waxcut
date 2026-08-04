@@ -71,6 +71,27 @@ class UnsupportedMp3Error(ValueError):
     """
 
 
+# A crafted file packed with minimum-size frames (as little as ~24 bytes
+# each for MPEG2/2.5 Layer III) parses in linear time but produces one Frame
+# object per frame -- real measurements show ~6x memory amplification over
+# input size. Unbounded, that's a cheap CPU/memory amplification lever for
+# anyone feeding untrusted "MP3" input to this library. 250 MB comfortably
+# covers legitimate use (even multi-hour, high-bitrate recordings) while
+# keeping worst-case parse time and memory on a single call bounded. See
+# SECURITY.md for the full threat-model note.
+_MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
+
+
+class FileTooLargeError(UnsupportedMp3Error):
+    """Raised when input exceeds _MAX_FILE_SIZE_BYTES.
+
+    A subclass of UnsupportedMp3Error, so existing `except
+    UnsupportedMp3Error` handlers still catch it -- but it's a distinct
+    class for callers who want to tell "too large" apart from "not a valid
+    MP3" (e.g. to show a different error message).
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class Frame:
     """One located MPEG Layer III frame.
@@ -149,22 +170,21 @@ _CHANNEL_MODE_MONO = 0b11
 _CRC_SIZE = 2  # bytes, present between the header and side info when protection_bit is 0
 
 
-def _is_mono(data: bytes, offset: int) -> bool:
-    header = struct.unpack_from(">I", data, offset)[0]
+def _is_mono(header: int) -> bool:
     channel_mode = (header >> 6) & 0b11
     return channel_mode == _CHANNEL_MODE_MONO
 
 
-def _has_crc(data: bytes, offset: int) -> bool:
-    header = struct.unpack_from(">I", data, offset)[0]
+def _has_crc(header: int) -> bool:
     protection_bit = (header >> 16) & 0b1
     return protection_bit == 0
 
 
 def _vbr_header_tag_offset(data: bytes, frame: Frame, version: MpegVersion) -> int | None:
     """Byte offset (relative to `frame.offset`) of a Xing/Info/VBRI tag, if this frame is one."""
-    side_info = _SIDE_INFO_SIZE[(version, _is_mono(data, frame.offset))]
-    crc = _CRC_SIZE if _has_crc(data, frame.offset) else 0
+    header = struct.unpack_from(">I", data, frame.offset)[0]
+    side_info = _SIDE_INFO_SIZE[(version, _is_mono(header))]
+    crc = _CRC_SIZE if _has_crc(header) else 0
     tag_start = 4 + crc + side_info
     if frame.offset + tag_start + 4 > len(data):
         return None
@@ -230,7 +250,15 @@ def scan_frames(data: bytes) -> list[Frame]:
             found anywhere in `data`. This is the correct outcome for
             non-MP3 files, empty input, and Layer I/II files (rejected
             on purpose — see module docstring).
+        FileTooLargeError: `data` exceeds 250 MB. A minimum-size-frame file
+            parses in linear time but produces one Frame object per frame —
+            unbounded, that's a cheap CPU/memory amplification lever for
+            untrusted input. See SECURITY.md.
     """
+    if len(data) > _MAX_FILE_SIZE_BYTES:
+        raise FileTooLargeError(
+            f"Input is {len(data)} bytes, exceeding the {_MAX_FILE_SIZE_BYTES}-byte (250 MB) limit."
+        )
     offset = id3v2_size(data)
     frames: list[Frame] = []
     cursor_ms = 0.0
@@ -420,8 +448,17 @@ def load_audio_stream(path: Path) -> AudioStream:
         UnsupportedMp3Error: No valid MPEG Layer III frame was found in the
             file, or the file consists only of a VBR header frame with no
             real audio data after it.
+        FileTooLargeError: The file exceeds 250 MB. Checked against the
+            file's size on disk before reading it, so an oversized file
+            never gets fully loaded into memory in the first place. See
+            SECURITY.md.
         FileNotFoundError: The file at `path` does not exist.
     """
+    file_size = path.stat().st_size
+    if file_size > _MAX_FILE_SIZE_BYTES:
+        raise FileTooLargeError(
+            f"{path} is {file_size} bytes, exceeding the {_MAX_FILE_SIZE_BYTES}-byte (250 MB) limit."
+        )
     data = path.read_bytes()
     raw_frames = scan_frames(data)
 

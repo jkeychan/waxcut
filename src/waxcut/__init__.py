@@ -16,6 +16,7 @@ from importlib.metadata import version as _version
 
 from waxcut.frames import (
     AudioStream,
+    FileTooLargeError,
     Frame,
     UnsupportedMp3Error,
     frame_index_at,
@@ -39,6 +40,7 @@ except PackageNotFoundError:
 
 __all__ = [
     "AudioStream",
+    "FileTooLargeError",
     "Frame",
     "UnsupportedMp3Error",
     "frame_index_at",
