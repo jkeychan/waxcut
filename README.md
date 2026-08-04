@@ -41,6 +41,22 @@ Path("part1.mp3").write_bytes(first_half)
 Path("part2.mp3").write_bytes(second_half)
 ```
 
+Splitting into more than two parts — `split_at`/`join_frames` collapse the
+loop above into one call:
+
+```python
+from waxcut import load_audio_stream, split_at, join_frames, slice_bytes
+
+stream = load_audio_stream(Path("mixtape.mp3"))
+parts = split_at(stream, timestamps_ms=[90_000, 180_000, 270_000])
+
+for i, part in enumerate(parts):
+    Path(f"part{i}.mp3").write_bytes(part)
+
+# join_frames is the inverse: reassembling parts reproduces the original
+assert join_frames(parts) == slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+```
+
 ## Why not ffmpeg or a decode/re-encode library?
 
 MP3 frames are self-describing, so their boundaries can be found directly
