@@ -9,7 +9,15 @@ from mutagen.mp3 import MP3
 import waxcut
 
 FIXTURES = Path(__file__).parent / "fixtures"
-FIXTURE_NAMES = ["cbr_stereo.mp3", "cbr_mono.mp3", "vbr_stereo.mp3", "lame_vbr_stereo.mp3"]
+FIXTURE_NAMES = [
+    "cbr_stereo.mp3",
+    "cbr_mono.mp3",
+    "vbr_stereo.mp3",
+    "lame_vbr_stereo.mp3",
+    "mono_8khz.mp3",
+    "joint_stereo_vbr.mp3",
+    "with_id3v1_trailer.mp3",
+]
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
