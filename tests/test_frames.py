@@ -1,3 +1,4 @@
+import contextlib
 import itertools
 import shutil
 import subprocess
@@ -108,3 +109,16 @@ def test_ffmpeg_native_encoder_does_not_produce_false_gapless_values():
         stream = waxcut.load_audio_stream(FIXTURES / name)
         assert stream.encoder_delay_samples == 0
         assert stream.encoder_padding_samples == 0
+
+
+REGRESSION_FIXTURES = Path(__file__).parent / "fixtures" / "regression"
+
+
+@pytest.mark.parametrize(
+    "regression_file",
+    sorted(REGRESSION_FIXTURES.glob("*.bin")) if REGRESSION_FIXTURES.exists() else [],
+    ids=lambda p: p.name,
+)
+def test_regression_corpus_does_not_crash(regression_file):
+    with contextlib.suppress(waxcut.UnsupportedMp3Error):
+        waxcut.iter_frames(regression_file.read_bytes())
