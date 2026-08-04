@@ -25,6 +25,12 @@ uv add waxcut
 
 ## Usage
 
+Quick duration check from the shell, no script needed:
+
+```bash
+python -c "from pathlib import Path; from waxcut import load_audio_stream as l; print(f'{l(Path(\"song.mp3\")).playable_duration_ms / 1000:.1f}s')"
+```
+
 ```python
 from pathlib import Path
 from waxcut import load_audio_stream, frame_index_at, slice_bytes

@@ -5,6 +5,7 @@ __pycache__/
 dist/
 *.egg-info/
 docs/superpowers/
+.claude/
 site/node_modules/
 site/build/
 site/.docusaurus/
