@@ -6,10 +6,10 @@ Install: `pip install waxcut` or `uv add waxcut`. Zero runtime dependencies.
 
 ## Docs
 
-- [Getting Started](https://waxcut.netlify.app/docs/getting-started): install and usage, including `split_at` for N-way splits
-- [API Reference](https://waxcut.netlify.app/docs/api-reference): every public function/class — signature, args, returns, raises
-- [How It Works](https://waxcut.netlify.app/docs/how-it-works): why frame-based splitting is safe; VBR, ID3v2, and LAME gapless handling
-- [Security](https://waxcut.netlify.app/docs/security): fuzzing, OpenSSF Scorecard, vulnerability reporting
+- [Getting Started](https://waxcut.pages.dev/docs/getting-started): install and usage, including `split_at` for N-way splits
+- [API Reference](https://waxcut.pages.dev/docs/api-reference): every public function/class — signature, args, returns, raises
+- [How It Works](https://waxcut.pages.dev/docs/how-it-works): why frame-based splitting is safe; VBR, ID3v2, and LAME gapless handling
+- [Security](https://waxcut.pages.dev/docs/security): fuzzing, OpenSSF Scorecard, vulnerability reporting
 
 ## Optional
 
