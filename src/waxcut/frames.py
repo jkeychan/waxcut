@@ -285,8 +285,10 @@ def frame_index_at(frames: list[Frame], target_ms: float) -> int:
         for a non-empty input.
 
     Raises:
-        IndexError: `frames` is empty.
+        ValueError: `frames` is empty.
     """
+    if not frames:
+        raise ValueError("frame_index_at() requires a non-empty frame list")
     idx = 0
     for i, frame in enumerate(frames):
         if frame.start_ms > target_ms:
@@ -317,8 +319,11 @@ def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) 
         corresponding span of the original file.
 
     Raises:
+        ValueError: `frames` is empty.
         IndexError: `start_idx` or `end_idx` is out of range for `frames`.
     """
+    if not frames:
+        raise ValueError("slice_bytes() requires a non-empty frame list")
     if start_idx >= end_idx:
         return b""
     start = frames[start_idx].offset
