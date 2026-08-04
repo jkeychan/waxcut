@@ -66,6 +66,10 @@ select = [
 # the fixed, hardcoded ffmpeg invocation isn't untrusted input; expected byte
 # counts in test fixtures are concrete values, not magic numbers to name.
 "tests/*" = ["S101", "S603", "S607", "PLR2004"]
+# A standalone dev diagnostic, not a library module or test -- printing
+# results to stdout is the entire point, and the fixed, hardcoded ffmpeg
+# invocation isn't untrusted input (same rationale as tests/* above).
+"bench/*" = ["T201", "S603", "S607"]
 
 [dependency-groups]
 dev = [

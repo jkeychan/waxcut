@@ -12,40 +12,46 @@ http://www.mp3-tech.org/programmer/frame_header.html
 
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
+from typing import Literal
+
+# MPEG audio version. Not a continuous quantity -- 2.5 is a de facto extension
+# to the standard (low sample rates), not "halfway between 2 and 3".
+MpegVersion = Literal[1, 2, 2.5]
 
 FRAME_SYNC_MASK = 0xFFE00000
 FRAME_SYNC = 0xFFE00000
 
 # index -> MPEG version; 0b01 is reserved and never appears in valid frames
-_VERSIONS = {0b00: 2.5, 0b10: 2, 0b11: 1}
+_VERSIONS: dict[int, MpegVersion] = {0b00: 2.5, 0b10: 2, 0b11: 1}
 # index -> layer number; 0b00 is reserved. "MP3" is specifically Layer III —
 # Layer I/II frames are rejected rather than mishandled (see _parse_header).
 _LAYER_III = 0b01
 
 # version -> bitrate index -> kbps, Layer III only; index 0 is "free" (unsupported), 15 is invalid
-_BITRATES_KBPS: dict[float, list[int | None]] = {
+_BITRATES_KBPS: dict[MpegVersion, list[int | None]] = {
     1: [None, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, None],
     2: [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
 }
 _BITRATES_KBPS[2.5] = _BITRATES_KBPS[2]
 
 # version -> sample rate index -> Hz; index 3 is reserved
-_SAMPLE_RATES: dict[float, list[int | None]] = {
+_SAMPLE_RATES: dict[MpegVersion, list[int | None]] = {
     1: [44100, 48000, 32000, None],
     2: [22050, 24000, 16000, None],
     2.5: [11025, 12000, 8000, None],
 }
 
 # version -> samples per Layer III frame
-_SAMPLES_PER_FRAME = {1: 1152, 2: 576, 2.5: 576}
+_SAMPLES_PER_FRAME: dict[MpegVersion, int] = {1: 1152, 2: 576, 2.5: 576}
 
 # (version, mono) -> side info size in bytes, i.e. where a Xing/Info/VBRI
 # tag (if present) starts relative to the frame's own offset.
-_SIDE_INFO_SIZE = {
+_SIDE_INFO_SIZE: dict[tuple[MpegVersion, bool], int] = {
     (1, False): 32,
     (1, True): 17,
     (2, False): 17,
@@ -65,7 +71,7 @@ class UnsupportedMp3Error(ValueError):
     """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Frame:
     """One located MPEG Layer III frame.
 
@@ -73,7 +79,7 @@ class Frame:
         offset: Byte offset of this frame's header within the source data.
         length: Total frame length in bytes (header + side info + audio data).
         start_ms: Playback position of this frame's start. For frames from
-            iter_frames, start_ms is 0-based from the first frame found in
+            scan_frames, start_ms is 0-based from the first frame found in
             the byte stream (VBR header frame included if present). For
             frames from AudioStream.frames (via load_audio_stream), the VBR
             header frame is excluded and start_ms is rebased so the first
@@ -110,7 +116,7 @@ def id3v2_size(data: bytes) -> int:
     return _ID3V2_HEADER_SIZE + size
 
 
-def _parse_header(data: bytes, offset: int) -> tuple[float, int, int, int] | None:
+def _parse_header(data: bytes, offset: int) -> tuple[MpegVersion, int, int, int] | None:
     """Return (version, bitrate_kbps, sample_rate, padding) for a valid Layer III header, else None."""
     if offset + 4 > len(data):
         return None
@@ -134,12 +140,13 @@ def _parse_header(data: bytes, offset: int) -> tuple[float, int, int, int] | Non
     return version, bitrate, sample_rate, padding
 
 
-def _frame_length(version: float, bitrate_kbps: int, sample_rate: int, padding: int) -> int:
+def _frame_length(version: MpegVersion, bitrate_kbps: int, sample_rate: int, padding: int) -> int:
     coefficient = 144 if version == 1 else 72
     return int(coefficient * bitrate_kbps * 1000 / sample_rate) + padding
 
 
 _CHANNEL_MODE_MONO = 0b11
+_CRC_SIZE = 2  # bytes, present between the header and side info when protection_bit is 0
 
 
 def _is_mono(data: bytes, offset: int) -> bool:
@@ -148,10 +155,17 @@ def _is_mono(data: bytes, offset: int) -> bool:
     return channel_mode == _CHANNEL_MODE_MONO
 
 
-def _vbr_header_tag_offset(data: bytes, frame: Frame, version: float) -> int | None:
+def _has_crc(data: bytes, offset: int) -> bool:
+    header = struct.unpack_from(">I", data, offset)[0]
+    protection_bit = (header >> 16) & 0b1
+    return protection_bit == 0
+
+
+def _vbr_header_tag_offset(data: bytes, frame: Frame, version: MpegVersion) -> int | None:
     """Byte offset (relative to `frame.offset`) of a Xing/Info/VBRI tag, if this frame is one."""
     side_info = _SIDE_INFO_SIZE[(version, _is_mono(data, frame.offset))]
-    tag_start = 4 + side_info
+    crc = _CRC_SIZE if _has_crc(data, frame.offset) else 0
+    tag_start = 4 + crc + side_info
     if frame.offset + tag_start + 4 > len(data):
         return None
     tag = data[frame.offset + tag_start : frame.offset + tag_start + 4]
@@ -194,7 +208,7 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
     return delay, padding
 
 
-def iter_frames(data: bytes) -> list[Frame]:
+def scan_frames(data: bytes) -> list[Frame]:
     """Scan raw MP3 bytes and return every located frame, in order.
 
     Skips a leading ID3v2 tag if present. Includes the Xing/Info/VBRI
@@ -238,6 +252,13 @@ def iter_frames(data: bytes) -> list[Frame]:
         samples = _SAMPLES_PER_FRAME[version]
         duration_ms = samples / sample_rate * 1000
 
+        # start_ms is deliberately an accumulated running total, not
+        # `len(frames) * duration_ms`: this function must tolerate malformed
+        # or adversarial input (see the fuzz harness), where a byte sequence
+        # a few frames in could spuriously resync at a different apparent
+        # version/sample_rate. Accumulating each frame's own duration keeps
+        # start_ms correct per-frame even then; assuming a single constant
+        # duration for the whole file would not.
         frames.append(Frame(offset=offset, length=length, start_ms=cursor_ms, duration_ms=duration_ms))
         cursor_ms += duration_ms
         offset += length
@@ -251,13 +272,13 @@ def total_duration_ms(frames: list[Frame]) -> float:
     """Total playback duration spanned by `frames`, in milliseconds.
 
     Args:
-        frames: A non-empty list of Frame, as returned by iter_frames.
+        frames: A non-empty list of Frame, as returned by scan_frames.
 
     Returns:
         The last frame's start_ms + duration_ms.
 
     Raises:
-        IndexError: `frames` is empty. iter_frames never returns an empty
+        IndexError: `frames` is empty. scan_frames never returns an empty
             list (it raises UnsupportedMp3Error instead), so this only
             happens if you've filtered or otherwise constructed an empty
             list yourself.
@@ -275,7 +296,7 @@ def frame_index_at(frames: list[Frame], target_ms: float) -> int:
     the requested time.
 
     Args:
-        frames: A non-empty list of Frame, as returned by iter_frames or
+        frames: A non-empty list of Frame, as returned by scan_frames or
             found on AudioStream.frames.
         target_ms: Desired split point in milliseconds. Values below the
             first frame's start_ms clamp to index 0; values at or beyond
@@ -286,10 +307,12 @@ def frame_index_at(frames: list[Frame], target_ms: float) -> int:
         for a non-empty input.
 
     Raises:
-        ValueError: `frames` is empty.
+        ValueError: `frames` is empty, or `target_ms` is NaN.
     """
     if not frames:
         raise ValueError("frame_index_at() requires a non-empty frame list")
+    if math.isnan(target_ms):
+        raise ValueError("frame_index_at() requires a non-NaN target_ms")
     idx = 0
     for i, frame in enumerate(frames):
         if frame.start_ms > target_ms:
@@ -302,13 +325,13 @@ def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) 
     """Byte range covering frames[start_idx:end_idx], contiguous.
 
     This is a plain byte-copy, not a re-parse: frames are assumed
-    contiguous (true for anything iter_frames produced from the same
+    contiguous (true for anything scan_frames produced from the same
     `data`), so the range is just [frames[start_idx].offset,
     frames[end_idx - 1] end).
 
     Args:
         data: The same bytes `frames` was derived from.
-        frames: Frame list from iter_frames or AudioStream.frames.
+        frames: Frame list from scan_frames or AudioStream.frames.
         start_idx: First frame index to include (inclusive).
         end_idx: One past the last frame index to include (exclusive) —
             standard Python slice semantics.
@@ -336,7 +359,7 @@ def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) 
     return data[start:end]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AudioStream:
     """Parsed MP3 stream with located frames and gapless metadata.
 
@@ -400,7 +423,7 @@ def load_audio_stream(path: Path) -> AudioStream:
         FileNotFoundError: The file at `path` does not exist.
     """
     data = path.read_bytes()
-    raw_frames = iter_frames(data)
+    raw_frames = scan_frames(data)
 
     first = raw_frames[0]
     version, _, sample_rate, _ = _parse_header(data, first.offset)
