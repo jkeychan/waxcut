@@ -71,9 +71,12 @@ class Frame:
     Attributes:
         offset: Byte offset of this frame's header within the source data.
         length: Total frame length in bytes (header + side info + audio data).
-        start_ms: Playback position of this frame's start, relative to the
-            first real audio frame (i.e. after any VBR header frame has
-            been excluded — see load_audio_stream).
+        start_ms: Playback position of this frame's start. For frames from
+            iter_frames, start_ms is 0-based from the first frame found in
+            the byte stream (VBR header frame included if present). For
+            frames from AudioStream.frames (via load_audio_stream), the VBR
+            header frame is excluded and start_ms is rebased so the first
+            real audio frame has start_ms=0.
         duration_ms: This frame's own playback duration.
     """
 
@@ -191,7 +194,28 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
 
 
 def iter_frames(data: bytes) -> list[Frame]:
-    """Scan `data` for MPEG audio frames, skipping any leading ID3v2 tag."""
+    """Scan raw MP3 bytes and return every located frame, in order.
+
+    Skips a leading ID3v2 tag if present. Includes the Xing/Info/VBRI
+    VBR header frame if the stream has one — callers that need audio-only
+    frames (with encoder metadata excluded and start_ms rebased to 0)
+    should use load_audio_stream instead, which calls this internally.
+
+    Args:
+        data: Raw file bytes. Any bytes-like object indexable/sliceable
+            the same way as bytes is accepted; a plain bytes object is
+            the tested and expected case.
+
+    Returns:
+        Frames in file order, each with byte offset/length and cumulative
+        start_ms/duration_ms.
+
+    Raises:
+        UnsupportedMp3Error: No valid MPEG-1/2/2.5 Layer III frame was
+            found anywhere in `data`. This is the correct outcome for
+            non-MP3 files, empty input, and Layer I/II files (rejected
+            on purpose — see module docstring).
+    """
     offset = id3v2_size(data)
     frames: list[Frame] = []
     cursor_ms = 0.0
@@ -291,6 +315,10 @@ def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) 
         `start_idx >= end_idx`. This output is itself a decodable MP3
         stream (no container/ID3 wrapper), byte-identical to the
         corresponding span of the original file.
+
+    Raises:
+        IndexError: `end_idx > len(frames)`, since accessing
+            `frames[end_idx - 1]` will fail for out-of-range indices.
     """
     if start_idx >= end_idx:
         return b""
@@ -360,8 +388,7 @@ def load_audio_stream(path: Path) -> AudioStream:
         UnsupportedMp3Error: No valid MPEG Layer III frame was found in the
             file, or the file consists only of a VBR header frame with no
             real audio data after it.
-        FileNotFoundError: The file at `path` does not exist or cannot be
-            opened.
+        FileNotFoundError: The file at `path` does not exist.
     """
     data = path.read_bytes()
     raw_frames = iter_frames(data)
