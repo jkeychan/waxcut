@@ -324,6 +324,10 @@ def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) 
     """
     if not frames:
         raise ValueError("slice_bytes() requires a non-empty frame list")
+    if start_idx < 0 or end_idx < 0:
+        raise IndexError(
+            f"slice_bytes() requires non-negative indices, got start_idx={start_idx}, end_idx={end_idx}"
+        )
     if start_idx >= end_idx:
         return b""
     start = frames[start_idx].offset

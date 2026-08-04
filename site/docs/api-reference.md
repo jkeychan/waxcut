@@ -130,10 +130,8 @@ the requested time.
   start clamps to `0`; a `target_ms` at or beyond the last frame's start
   clamps to the last index.
 
-**Current behavior on an empty `frames` list:** `frame_index_at` does not
-raise anything itself — the loop body never runs and it returns `0`, which
-is not a valid index into an empty list. Callers are responsible for not
-passing an empty `frames` list.
+**On an empty `frames` list:** raises `ValueError` immediately, rather than
+returning a meaningless index.
 
 ## `slice_bytes`
 
@@ -160,11 +158,11 @@ corresponding span of the original file.
 - `bytes` — `b""` if `start_idx >= end_idx`; otherwise the byte span from
   `frames[start_idx].offset` through the end of `frames[end_idx - 1]`.
 
-**Current behavior:** `slice_bytes` does not itself validate that
-`start_idx`/`end_idx` are in range for `frames` — passing out-of-range
-indices (for example, any non-empty range against an empty `frames` list)
-surfaces as a normal Python `IndexError` from indexing `frames[start_idx]`
-or `frames[end_idx - 1]`.
+**On an empty `frames` list:** raises `ValueError`. **On a negative
+`start_idx`/`end_idx`:** raises `IndexError` explicitly, rather than
+silently wrapping to an unintended frame the way Python's own negative
+indexing would. Positive out-of-range indices surface as a normal Python
+`IndexError` from indexing `frames[start_idx]` or `frames[end_idx - 1]`.
 
 ## `total_duration_ms`
 

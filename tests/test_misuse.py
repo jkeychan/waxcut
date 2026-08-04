@@ -18,6 +18,14 @@ def test_slice_bytes_rejects_empty_frame_list():
         waxcut.slice_bytes(b"", [], 0, 0)
 
 
+def test_slice_bytes_rejects_negative_indices():
+    frames = [waxcut.Frame(offset=0, length=10, start_ms=0.0, duration_ms=26.0)]
+    with pytest.raises(IndexError):
+        waxcut.slice_bytes(b"\x00" * 10, frames, -1, 1)
+    with pytest.raises(IndexError):
+        waxcut.slice_bytes(b"\x00" * 10, frames, 0, -1)
+
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
