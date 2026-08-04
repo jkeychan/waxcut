@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/waxcut.svg)](https://pypi.org/project/waxcut/)
 [![CI](https://github.com/jkeychan/waxcut/actions/workflows/ci.yml/badge.svg)](https://github.com/jkeychan/waxcut/actions/workflows/ci.yml)
 [![Fuzzing](https://github.com/jkeychan/waxcut/actions/workflows/cflite_pr.yml/badge.svg)](https://github.com/jkeychan/waxcut/actions/workflows/cflite_pr.yml)
+[![Docs](https://github.com/jkeychan/waxcut/actions/workflows/docs.yml/badge.svg)](https://jkeychan.github.io/waxcut/)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jkeychan/waxcut/badge)](https://scorecard.dev/viewer/?uri=github.com/jkeychan/waxcut)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13947/badge)](https://www.bestpractices.dev/projects/13947)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
