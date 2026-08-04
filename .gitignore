@@ -8,3 +8,6 @@ docs/superpowers/
 site/node_modules/
 site/build/
 site/.docusaurus/
+
+# Local Netlify folder
+.netlify
