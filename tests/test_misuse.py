@@ -52,3 +52,14 @@ def test_iter_frames_rejects_empty_bytes():
 def test_iter_frames_rejects_various_garbage(garbage):
     with pytest.raises(waxcut.UnsupportedMp3Error):
         waxcut.iter_frames(garbage)
+
+
+def test_id3v2_tag_claiming_huge_size_does_not_hang_or_crash():
+    # Syncsafe 0x7F,0x7F,0x7F,0x7F = the maximum representable size
+    # (~256MB) claimed on a file that's actually 14 bytes long.
+    header = b"ID3\x04\x00\x00" + b"\x7f\x7f\x7f\x7f"
+    tiny_file = header + b"\x00\x00\x00\x00"
+    assert waxcut.id3v2_size(tiny_file) > len(tiny_file)
+
+    with pytest.raises(waxcut.UnsupportedMp3Error):
+        waxcut.iter_frames(tiny_file)
