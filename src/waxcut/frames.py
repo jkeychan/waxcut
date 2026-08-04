@@ -340,11 +340,21 @@ def scan_frames(data: bytes) -> Frames:
     duration_ms_values: array = array("d")
     cursor_ms = 0.0
 
-    while offset < len(data):
+    while True:
+        # Every valid sync requires the byte at `offset` to be exactly 0xFF
+        # (the top byte of FRAME_SYNC_MASK) -- _parse_header would reject
+        # any other byte immediately anyway, so jump straight past them with
+        # a fast C-level scan instead of calling into _parse_header (struct
+        # unpack + bit masking) for every single byte of a non-frame gap
+        # (ID3v1/APE trailers, padding, adversarial filler).
+        offset = data.find(b"\xff", offset)
+        if offset == -1:
+            break
+
         parsed = _parse_header(data, offset)
         if parsed is None:
-            # Not a frame boundary (could be trailing ID3v1/APE tag, or padding).
-            # Advance one byte and keep scanning for the next valid sync.
+            # 0xFF matched but the rest of the header didn't -- a coincidental
+            # byte, not a real sync. Advance one byte and keep scanning.
             offset += 1
             continue
 
