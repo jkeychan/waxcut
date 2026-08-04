@@ -36,5 +36,20 @@ Path("part1.mp3").write_bytes(first_half)
 Path("part2.mp3").write_bytes(second_half)
 ```
 
+## Splitting into more than two parts
+
+`split_at`/`join_frames` collapse the loop above into one call for N cut
+points:
+
+```python
+from waxcut import load_audio_stream, split_at
+
+stream = load_audio_stream(Path("mixtape.mp3"))
+parts = split_at(stream, timestamps_ms=[90_000, 180_000, 270_000])
+
+for i, part in enumerate(parts):
+    Path(f"part{i}.mp3").write_bytes(part)
+```
+
 See [How It Works](./how-it-works.md) for why this approach is safe, and the
 [API Reference](./api-reference.md) for the full public surface.

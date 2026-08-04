@@ -44,3 +44,18 @@ def test_n_way_split_reassembles_to_identical_hash(fixture_path, num_splits):
 
     assert hashlib.sha256(reassembled).hexdigest() == expected_hash
     assert reassembled == whole
+
+
+@pytest.mark.parametrize("num_splits", [1, 2, 3, 7])
+def test_split_at_and_join_frames_reassemble_to_identical_hash(fixture_path, num_splits):
+    stream = waxcut.load_audio_stream(fixture_path)
+    duration = stream.playable_duration_ms
+
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+    expected_hash = hashlib.sha256(whole).hexdigest()
+
+    points = [duration * i / (num_splits + 1) for i in range(1, num_splits + 1)]
+    reassembled = waxcut.join_frames(waxcut.split_at(stream, points))
+
+    assert hashlib.sha256(reassembled).hexdigest() == expected_hash
+    assert reassembled == whole

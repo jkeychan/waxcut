@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 FRAME_SYNC_MASK = 0xFFE00000
@@ -425,3 +426,45 @@ def load_audio_stream(path: Path) -> AudioStream:
     if not rebased:
         raise UnsupportedMp3Error("File contains only a VBR header frame, no audio.")
     return AudioStream(data, rebased, delay, padding, sample_rate)
+
+
+def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
+    """Split `stream` into segments at the given cut points.
+
+    Convenience wrapper around frame_index_at + slice_bytes for the common
+    case of cutting at N timestamps in one call.
+
+    Args:
+        stream: An AudioStream from load_audio_stream.
+        timestamps_ms: Desired cut points, in milliseconds. Need not be
+            sorted or in range — each is passed through frame_index_at,
+            which clamps out-of-range values, so an out-of-order or
+            duplicate timestamp simply produces an empty segment at that
+            position rather than raising.
+
+    Returns:
+        A list of len(timestamps_ms) + 1 byte segments, in order. Each
+        segment is a standalone, decodable MP3 stream, byte-identical to
+        the corresponding span of stream.data. Concatenating all segments
+        (see join_frames) reproduces the original audio exactly.
+    """
+    idxs = [0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)]
+    return [slice_bytes(stream.data, stream.frames, start, end) for start, end in pairwise(idxs)]
+
+
+def join_frames(segments: list[bytes]) -> bytes:
+    """Concatenate frame-aligned MP3 byte segments back into one stream.
+
+    MPEG Layer III frames are self-delimited — each one carries its own
+    length in its header — so concatenating segments produced by
+    slice_bytes/split_at is always safe and reproduces the original bytes
+    exactly, with no need to re-parse or re-align anything.
+
+    Args:
+        segments: Byte segments to join, in order, as produced by
+            slice_bytes or split_at.
+
+    Returns:
+        The concatenated bytes.
+    """
+    return b"".join(segments)
