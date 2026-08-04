@@ -317,8 +317,7 @@ def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) 
         corresponding span of the original file.
 
     Raises:
-        IndexError: `end_idx > len(frames)`, since accessing
-            `frames[end_idx - 1]` will fail for out-of-range indices.
+        IndexError: `start_idx` or `end_idx` is out of range for `frames`.
     """
     if start_idx >= end_idx:
         return b""
