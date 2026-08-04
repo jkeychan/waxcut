@@ -82,3 +82,29 @@ def test_id3v2_tag_claiming_huge_size_does_not_hang_or_crash():
 
     with pytest.raises(waxcut.UnsupportedMp3Error):
         waxcut.scan_frames(tiny_file)
+
+
+def test_scan_frames_rejects_input_over_the_size_limit(monkeypatch):
+    # Patch the limit down rather than allocating a real 250MB buffer --
+    # exercises the exact same guard without the CI cost.
+    monkeypatch.setattr("waxcut.frames._MAX_FILE_SIZE_BYTES", 10)
+    with pytest.raises(waxcut.FileTooLargeError):
+        waxcut.scan_frames(b"\x00" * 11)
+
+
+def test_scan_frames_allows_input_at_exactly_the_size_limit(monkeypatch):
+    # FileTooLargeError subclasses UnsupportedMp3Error, so a plain
+    # pytest.raises(UnsupportedMp3Error) here would pass even if the size
+    # guard incorrectly fired at the boundary -- assert the exact type.
+    monkeypatch.setattr("waxcut.frames._MAX_FILE_SIZE_BYTES", 10)
+    with pytest.raises(waxcut.UnsupportedMp3Error) as exc_info:
+        waxcut.scan_frames(b"\x00" * 10)  # not a valid MP3, but not oversized either
+    assert exc_info.type is waxcut.UnsupportedMp3Error
+
+
+def test_load_audio_stream_rejects_file_over_the_size_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr("waxcut.frames._MAX_FILE_SIZE_BYTES", 10)
+    oversized = tmp_path / "too_big.mp3"
+    oversized.write_bytes(b"\x00" * 11)
+    with pytest.raises(waxcut.FileTooLargeError):
+        waxcut.load_audio_stream(oversized)

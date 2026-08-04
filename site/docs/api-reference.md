@@ -34,6 +34,9 @@ frame starts at 0, and — if the header carries a LAME gapless extension —
 - `UnsupportedMp3Error` — no valid MPEG Layer III frame was found anywhere
   in the file (propagated from `scan_frames`), or the file consists of only
   a VBR header frame with no audio frames after it.
+- `FileTooLargeError` — the file exceeds 250 MB. Checked against the file's
+  size on disk *before* reading it, so an oversized file never gets loaded
+  into memory in the first place. See [Security](./security.md#resource-limits).
 - `FileNotFoundError` (and other OS-level errors) — propagated from reading
   the file if `path` doesn't exist or can't be opened.
 
@@ -260,6 +263,8 @@ not `scan_frames`'s.
   in `data`. This covers both non-MP3 input and files containing only
   Layer I/II frames, which this parser doesn't recognize (see
   [How It Works](./how-it-works.md#why-layer-iii-are-out-of-scope)).
+- `FileTooLargeError` — `data` exceeds 250 MB. See
+  [Security](./security.md#resource-limits).
 
 ## `id3v2_size`
 
@@ -296,3 +301,16 @@ current implementation this covers two cases:
   it.
 
 It subclasses `ValueError`.
+
+## `FileTooLargeError`
+
+```python
+class FileTooLargeError(UnsupportedMp3Error)
+```
+
+Raised by [`scan_frames`](#scan_frames)/[`load_audio_stream`](#load_audio_stream)
+when input exceeds 250 MB — see [Security](./security.md#resource-limits)
+for why this limit exists. Subclasses `UnsupportedMp3Error` (and therefore
+`ValueError`), so an existing `except UnsupportedMp3Error` handler still
+catches it. It's a distinct class so callers who want to tell "too large"
+apart from "not a valid MP3" can catch it specifically.

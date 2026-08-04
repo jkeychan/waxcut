@@ -37,6 +37,31 @@ per se. This matters specifically because `load_audio_stream` and
 `scan_frames` read raw, untrusted bytes directly (offsets, lengths, and tag
 fields all come from attacker-controlled header bits).
 
+## Resource limits
+
+Fuzzing (above) catches crashes and hangs on small mutated inputs within a
+CI time budget — it does not exercise deliberately large adversarial input,
+which is a different threat: a file packed with minimum-size MPEG2/2.5
+Layer III frames (as little as ~24 bytes each) parses in linear time and
+never crashes, but produces one `Frame` object per frame. Measured directly:
+a 10 MB file built this way produces ~58 MB of `Frame` objects — roughly 6x
+memory amplification on top of holding the input bytes themselves — and
+that scales linearly with input size. Left unbounded, that's a cheap
+CPU/memory amplification lever for any service that accepts user-uploaded
+"MP3" files and calls `load_audio_stream`/`scan_frames` on them without an
+upstream size limit of its own.
+
+`scan_frames` and `load_audio_stream` both reject input over **250 MB**,
+raising [`FileTooLargeError`](./api-reference.md#filetoolargeerror) — a
+`load_audio_stream` call checks the file's size on disk *before* reading
+it, so an oversized file is never fully loaded into memory in the first
+place. 250 MB comfortably covers legitimate use (even long, high-bitrate
+recordings) while keeping the worst-case cost of a single call bounded.
+This isn't currently a configurable parameter — if your use case
+legitimately needs to process larger files, please
+[open an issue](https://github.com/jkeychan/waxcut/issues/new) rather than
+relying on undocumented internals to work around it.
+
 ## Supply-chain and process posture
 
 waxcut's security posture is checked and scored by two independent,
