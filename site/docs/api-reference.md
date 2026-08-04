@@ -17,7 +17,7 @@ Loads an MP3 file and parses it into an [`AudioStream`](#audiostream) ready
 for frame-accurate splitting.
 
 Reads the whole file into memory, scans it for MPEG Layer III frames (see
-[`iter_frames`](#iter_frames), which also skips any leading ID3v2 tag), and
+[`scan_frames`](#scan_frames), which also skips any leading ID3v2 tag), and
 checks whether the first frame is a Xing/Info/VBRI VBR header rather than
 real audio. If it is, that frame is excluded from the returned `frames`
 list, every remaining frame's `start_ms` is rebased so the first real audio
@@ -32,7 +32,7 @@ frame starts at 0, and — if the header carries a LAME gapless extension —
 
 **Raises**
 - `UnsupportedMp3Error` — no valid MPEG Layer III frame was found anywhere
-  in the file (propagated from `iter_frames`), or the file consists of only
+  in the file (propagated from `scan_frames`), or the file consists of only
   a VBR header frame with no audio frames after it.
 - `FileNotFoundError` (and other OS-level errors) — propagated from reading
   the file if `path` doesn't exist or can't be opened.
@@ -92,7 +92,7 @@ class Frame:
 ```
 
 One located MPEG Layer III frame, as produced by
-[`iter_frames`](#iter_frames) or found in `AudioStream.frames`.
+[`scan_frames`](#scan_frames) or found in `AudioStream.frames`.
 
 **Fields**
 - `offset` (`int`) — byte offset of this frame's header within the source
@@ -101,7 +101,7 @@ One located MPEG Layer III frame, as produced by
   info + audio data) — how far to advance from `offset` to reach the next
   frame.
 - `start_ms` (`float`) — playback position of this frame's start, in
-  milliseconds. Frames returned directly by `iter_frames` are timed from
+  milliseconds. Frames returned directly by `scan_frames` are timed from
   the very first frame found in the data; frames on `AudioStream.frames`
   are timed relative to the first *real audio* frame, i.e. after any VBR
   header frame has been excluded by `load_audio_stream`.
@@ -121,7 +121,7 @@ land on a frame's own start, so this snaps to the nearest one at or before
 the requested time.
 
 **Args**
-- `frames` (`list[Frame]`) — frame list, e.g. from `iter_frames` or
+- `frames` (`list[Frame]`) — frame list, e.g. from `scan_frames` or
   `AudioStream.frames`.
 - `target_ms` (`float`) — desired split point in milliseconds.
 
@@ -130,8 +130,10 @@ the requested time.
   start clamps to `0`; a `target_ms` at or beyond the last frame's start
   clamps to the last index.
 
-**On an empty `frames` list:** raises `ValueError` immediately, rather than
-returning a meaningless index.
+**On an empty `frames` list, or a NaN `target_ms`:** raises `ValueError`
+immediately, rather than returning a meaningless index. (NaN comparisons are
+always false, so without this guard a NaN target would silently walk to the
+last frame index instead of erroring.)
 
 ## `slice_bytes`
 
@@ -142,13 +144,13 @@ def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) 
 Returns the raw bytes covering `frames[start_idx:end_idx]` as one
 contiguous range copied directly out of `data` — this is a byte-copy, not a
 re-parse. Frames are assumed contiguous, which holds for any list produced
-by `iter_frames` from the same `data`. The result is itself a decodable,
+by `scan_frames` from the same `data`. The result is itself a decodable,
 standalone MP3 stream (no container/ID3 wrapper), byte-identical to the
 corresponding span of the original file.
 
 **Args**
 - `data` (`bytes`) — the same bytes `frames` was derived from.
-- `frames` (`list[Frame]`) — frame list from `iter_frames` or
+- `frames` (`list[Frame]`) — frame list from `scan_frames` or
   `AudioStream.frames`.
 - `start_idx` (`int`) — first frame index to include (inclusive).
 - `end_idx` (`int`) — one past the last frame index to include (exclusive)
@@ -215,21 +217,21 @@ frame's `start_ms` plus its `duration_ms`.
 
 **Args**
 - `frames` (`list[Frame]`) — a non-empty list of `Frame`, as returned by
-  `iter_frames`.
+  `scan_frames`.
 
 **Returns**
 - `float`
 
 **Raises**
 - `IndexError` — `frames` is empty (`frames[-1]` on an empty list).
-  `iter_frames` itself never returns an empty list — it raises
+  `scan_frames` itself never returns an empty list — it raises
   `UnsupportedMp3Error` instead — so this only happens if you pass in an
   empty list you constructed or filtered yourself.
 
-## `iter_frames`
+## `scan_frames`
 
 ```python
-def iter_frames(data: bytes) -> list[Frame]
+def scan_frames(data: bytes) -> list[Frame]
 ```
 
 Scans `data` for MPEG Layer III audio frames, skipping any leading ID3v2
@@ -245,7 +247,7 @@ cumulatively from the first frame found in `data`.
 Note that this returns *every* parsed frame, including a leading
 Xing/Info/VBRI VBR header frame if the file has one — excluding that frame
 from playback/duration is [`load_audio_stream`](#load_audio_stream)'s job,
-not `iter_frames`'s.
+not `scan_frames`'s.
 
 **Args**
 - `data` (`bytes`) — raw file bytes.
@@ -285,7 +287,7 @@ class UnsupportedMp3Error(ValueError)
 Raised when frame parsing can't make sense of the input as an MP3. In the
 current implementation this covers two cases:
 
-- [`iter_frames`](#iter_frames) finds no valid MPEG Layer III frame
+- [`scan_frames`](#scan_frames) finds no valid MPEG Layer III frame
   anywhere in the data — this includes files that aren't MP3s at all, and
   files that contain only Layer I/II frames, which this parser doesn't
   recognize.

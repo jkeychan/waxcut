@@ -18,7 +18,7 @@ sample rate index, and padding bit. Critically, those fields are enough to
 compute the frame's exact length in bytes on their own — no need to decode
 the audio data that follows.
 
-waxcut's `iter_frames` scans a file byte-by-byte looking for a valid sync
+waxcut's `scan_frames` scans a file byte-by-byte looking for a valid sync
 word, decodes the header fields (`waxcut.frames._parse_header`), computes the
 frame length from them, and records a `Frame(offset, length, start_ms,
 duration_ms)`. If the header decodes to a length that doesn't fit in the

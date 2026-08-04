@@ -34,7 +34,7 @@ malformed and adversarial byte sequences — truncated headers, corrupted
 sync words, bogus bitrate/sample-rate indices, malformed ID3v2/Xing/Info/VBRI
 tags — looking for crashes, hangs, or memory issues rather than correctness
 per se. This matters specifically because `load_audio_stream` and
-`iter_frames` read raw, untrusted bytes directly (offsets, lengths, and tag
+`scan_frames` read raw, untrusted bytes directly (offsets, lengths, and tag
 fields all come from attacker-controlled header bits).
 
 ## Supply-chain and process posture

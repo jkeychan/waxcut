@@ -1,4 +1,4 @@
-"""Fuzz harness for waxcut.iter_frames: the only entry point that parses
+"""Fuzz harness for waxcut.scan_frames: the only entry point that parses
 untrusted raw bytes directly. UnsupportedMp3Error is the only exception
 frame parsing should ever raise on malformed input — anything else is a bug.
 """
@@ -13,7 +13,7 @@ with atheris.instrument_imports():
 
 def test_one_input(data: bytes) -> None:
     try:
-        frames = waxcut.iter_frames(data)
+        frames = waxcut.scan_frames(data)
     except waxcut.UnsupportedMp3Error:
         return
 

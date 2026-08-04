@@ -1,6 +1,7 @@
 """Tests for how the library behaves when used incorrectly, not just when
 fed malformed MP3 data (see test_frames.py for that side of things)."""
 
+import math
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,16 @@ import waxcut
 def test_frame_index_at_rejects_empty_frame_list():
     with pytest.raises(ValueError, match="empty"):
         waxcut.frame_index_at([], target_ms=0)
+
+
+def test_frame_index_at_rejects_nan_target_ms():
+    # NaN comparisons are always False, so `frame.start_ms > target_ms` never
+    # trips -- without an explicit guard this silently walks to the last
+    # frame index instead of raising, indistinguishable from a legitimate
+    # clamp on real input.
+    frames = [waxcut.Frame(offset=0, length=10, start_ms=0.0, duration_ms=26.0)]
+    with pytest.raises(ValueError, match="NaN"):
+        waxcut.frame_index_at(frames, math.nan)
 
 
 def test_slice_bytes_rejects_empty_frame_list():
@@ -44,9 +55,9 @@ def test_load_audio_stream_non_mp3_file_raises_unsupported():
         waxcut.load_audio_stream(FIXTURES / "not_an_mp3.txt")
 
 
-def test_iter_frames_rejects_empty_bytes():
+def test_scan_frames_rejects_empty_bytes():
     with pytest.raises(waxcut.UnsupportedMp3Error):
-        waxcut.iter_frames(b"")
+        waxcut.scan_frames(b"")
 
 
 @pytest.mark.parametrize(
@@ -57,9 +68,9 @@ def test_iter_frames_rejects_empty_bytes():
         bytes(range(256)) * 4,
     ],
 )
-def test_iter_frames_rejects_various_garbage(garbage):
+def test_scan_frames_rejects_various_garbage(garbage):
     with pytest.raises(waxcut.UnsupportedMp3Error):
-        waxcut.iter_frames(garbage)
+        waxcut.scan_frames(garbage)
 
 
 def test_id3v2_tag_claiming_huge_size_does_not_hang_or_crash():
@@ -70,4 +81,4 @@ def test_id3v2_tag_claiming_huge_size_does_not_hang_or_crash():
     assert waxcut.id3v2_size(tiny_file) > len(tiny_file)
 
     with pytest.raises(waxcut.UnsupportedMp3Error):
-        waxcut.iter_frames(tiny_file)
+        waxcut.scan_frames(tiny_file)

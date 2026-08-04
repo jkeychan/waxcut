@@ -1,6 +1,7 @@
 import contextlib
 import itertools
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -92,7 +93,7 @@ def test_id3v2_size_with_tag():
 
 def test_unsupported_file_raises():
     with pytest.raises(waxcut.UnsupportedMp3Error):
-        waxcut.iter_frames(b"this is not an mp3 file at all")
+        waxcut.scan_frames(b"this is not an mp3 file at all")
 
 
 def test_frame_index_at_clamps_to_range(fixture_path):
@@ -121,7 +122,7 @@ REGRESSION_FIXTURES = Path(__file__).parent / "fixtures" / "regression"
 )
 def test_regression_corpus_does_not_crash(regression_file):
     with contextlib.suppress(waxcut.UnsupportedMp3Error):
-        waxcut.iter_frames(regression_file.read_bytes())
+        waxcut.scan_frames(regression_file.read_bytes())
 
 
 def test_split_at_matches_manual_frame_index_at_and_slice_bytes(fixture_path):
@@ -161,3 +162,52 @@ def test_join_frames_reverses_split_at(fixture_path):
 
 def test_join_frames_empty_list_returns_empty_bytes():
     assert waxcut.join_frames([]) == b""
+
+
+def _mpeg1_stereo_128kbps_header(*, protection_bit: int) -> bytes:
+    """A valid MPEG1 Layer III, 128kbps, 44100Hz, stereo frame header."""
+    sync = 0x7FF << 21
+    version = 0b11 << 19  # MPEG1
+    layer = 0b01 << 17  # Layer III
+    protection = protection_bit << 16
+    bitrate_idx = 9 << 12  # 128kbps
+    sample_rate_idx = 0b00 << 10  # 44100Hz
+    channel_mode = 0b00 << 6  # stereo
+    header = sync | version | layer | protection | bitrate_idx | sample_rate_idx | channel_mode
+    return struct.pack(">I", header)
+
+
+def test_lame_gapless_tag_found_when_frame_is_crc_protected(tmp_path):
+    # A CRC-protected frame (protection_bit=0) has 2 extra bytes between the
+    # header and side info -- the LAME/Xing tag offset must account for them
+    # or gapless delay/padding silently fails to be detected.
+    header = _mpeg1_stereo_128kbps_header(protection_bit=0)
+    frame_length = 417  # 144 * 128000 / 44100, truncated, no padding
+
+    crc = b"\x00\x00"
+    side_info = b"\x00" * 32
+    tag = b"Xing"
+    flags = b"\x00\x00\x00\x00"  # no optional Xing fields present
+    version_string = b"LAME3.100"  # 9 bytes, must start with b"LAME"
+    unused = b"\x00" * (21 - len(version_string))
+    delay, padding = 500, 1000
+    delay_padding = bytes(
+        [
+            (delay >> 4) & 0xFF,
+            ((delay & 0xF) << 4) | ((padding >> 8) & 0xF),
+            padding & 0xFF,
+        ]
+    )
+
+    frame_one = header + crc + side_info + tag + flags + version_string + unused + delay_padding
+    frame_one += b"\x00" * (frame_length - len(frame_one))
+    assert len(frame_one) == frame_length
+
+    frame_two = _mpeg1_stereo_128kbps_header(protection_bit=1) + b"\x00" * (frame_length - 4)
+
+    synthetic_mp3 = tmp_path / "crc_protected.mp3"
+    synthetic_mp3.write_bytes(frame_one + frame_two)
+
+    stream = waxcut.load_audio_stream(synthetic_mp3)
+    assert stream.encoder_delay_samples == delay
+    assert stream.encoder_padding_samples == padding

@@ -32,6 +32,15 @@ independent parser where relevant — see `tests/test_frames.py` for the
 existing pattern (duration matching, frame contiguity, byte-completeness of
 splits, and independent decode validation via `ffmpeg` where available).
 
+## Benchmarking
+
+`bench/benchmark.py` is a standalone throughput diagnostic (not part of
+CI/pytest) for changes that touch the parsing hot path:
+
+```bash
+uv run python bench/benchmark.py
+```
+
 ## Pull request process
 
 - Fork the repo, branch from `main`, open a PR against `main`.
