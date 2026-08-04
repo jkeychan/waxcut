@@ -56,11 +56,30 @@ _VBR_HEADER_TAGS = (b"Xing", b"Info", b"VBRI")
 
 
 class UnsupportedMp3Error(ValueError):
-    """Raised when a frame header uses a variant this parser doesn't handle."""
+    """Raised when frame parsing can't make sense of the input.
+
+    This covers both "not an MP3 at all" (no valid Layer III sync found)
+    and the one genuine edge case in load_audio_stream: a file consisting
+    of only a Xing/Info/VBRI header frame with no real audio after it.
+    """
 
 
 @dataclass(frozen=True)
 class Frame:
+    """One located MPEG Layer III frame.
+
+    Attributes:
+        offset: Byte offset of this frame's header within the source data.
+        length: Total frame length in bytes (header + side info + audio data).
+        start_ms: Playback position of this frame's start. For frames from
+            iter_frames, start_ms is 0-based from the first frame found in
+            the byte stream (VBR header frame included if present). For
+            frames from AudioStream.frames (via load_audio_stream), the VBR
+            header frame is excluded and start_ms is rebased so the first
+            real audio frame has start_ms=0.
+        duration_ms: This frame's own playback duration.
+    """
+
     offset: int
     length: int
     start_ms: float
@@ -71,7 +90,16 @@ _ID3V2_HEADER_SIZE = 10
 
 
 def id3v2_size(data: bytes) -> int:
-    """Return the byte length of a leading ID3v2 tag, or 0 if there isn't one."""
+    """Return the byte length of a leading ID3v2 tag, or 0 if there isn't one.
+
+    Args:
+        data: Raw file bytes. Any bytes-like object indexable/sliceable
+            the same way as bytes is accepted.
+
+    Returns:
+        The size in bytes of the ID3v2 tag if present (including the 10-byte
+        header), or 0 if no ID3v2 tag is found.
+    """
     if len(data) < _ID3V2_HEADER_SIZE or data[:3] != b"ID3":
         return 0
     # Tag size is a 4-byte syncsafe integer (7 significant bits per byte).
@@ -166,7 +194,28 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
 
 
 def iter_frames(data: bytes) -> list[Frame]:
-    """Scan `data` for MPEG audio frames, skipping any leading ID3v2 tag."""
+    """Scan raw MP3 bytes and return every located frame, in order.
+
+    Skips a leading ID3v2 tag if present. Includes the Xing/Info/VBRI
+    VBR header frame if the stream has one — callers that need audio-only
+    frames (with encoder metadata excluded and start_ms rebased to 0)
+    should use load_audio_stream instead, which calls this internally.
+
+    Args:
+        data: Raw file bytes. Any bytes-like object indexable/sliceable
+            the same way as bytes is accepted; a plain bytes object is
+            the tested and expected case.
+
+    Returns:
+        Frames in file order, each with byte offset/length and cumulative
+        start_ms/duration_ms.
+
+    Raises:
+        UnsupportedMp3Error: No valid MPEG-1/2/2.5 Layer III frame was
+            found anywhere in `data`. This is the correct outcome for
+            non-MP3 files, empty input, and Layer I/II files (rejected
+            on purpose — see module docstring).
+    """
     offset = id3v2_size(data)
     frames: list[Frame] = []
     cursor_ms = 0.0
@@ -198,12 +247,48 @@ def iter_frames(data: bytes) -> list[Frame]:
 
 
 def total_duration_ms(frames: list[Frame]) -> float:
+    """Total playback duration spanned by `frames`, in milliseconds.
+
+    Args:
+        frames: A non-empty list of Frame, as returned by iter_frames.
+
+    Returns:
+        The last frame's start_ms + duration_ms.
+
+    Raises:
+        IndexError: `frames` is empty. iter_frames never returns an empty
+            list (it raises UnsupportedMp3Error instead), so this only
+            happens if you've filtered or otherwise constructed an empty
+            list yourself.
+    """
     last = frames[-1]
     return last.start_ms + last.duration_ms
 
 
 def frame_index_at(frames: list[Frame], target_ms: float) -> int:
-    """Index of the last frame starting at or before `target_ms` (clamped to range)."""
+    """Index of the last frame starting at or before `target_ms`.
+
+    This is how you turn a "cut at N milliseconds" request into a frame
+    boundary for slice_bytes — frame-accurate splitting can only land on
+    a frame's own start, so this snaps to the nearest one at or before
+    the requested time.
+
+    Args:
+        frames: A non-empty list of Frame, as returned by iter_frames or
+            found on AudioStream.frames.
+        target_ms: Desired split point in milliseconds. Values below the
+            first frame's start_ms clamp to index 0; values at or beyond
+            the last frame's start clamp to the last frame's index.
+
+    Returns:
+        An index into `frames`, always in range `[0, len(frames) - 1]`
+        for a non-empty input.
+
+    Raises:
+        ValueError: `frames` is empty.
+    """
+    if not frames:
+        raise ValueError("frame_index_at() requires a non-empty frame list")
     idx = 0
     for i, frame in enumerate(frames):
         if frame.start_ms > target_ms:
@@ -213,7 +298,32 @@ def frame_index_at(frames: list[Frame], target_ms: float) -> int:
 
 
 def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) -> bytes:
-    """Byte range covering frames[start_idx:end_idx], contiguous so no re-parsing needed."""
+    """Byte range covering frames[start_idx:end_idx], contiguous.
+
+    This is a plain byte-copy, not a re-parse: frames are assumed
+    contiguous (true for anything iter_frames produced from the same
+    `data`), so the range is just [frames[start_idx].offset,
+    frames[end_idx - 1] end).
+
+    Args:
+        data: The same bytes `frames` was derived from.
+        frames: Frame list from iter_frames or AudioStream.frames.
+        start_idx: First frame index to include (inclusive).
+        end_idx: One past the last frame index to include (exclusive) —
+            standard Python slice semantics.
+
+    Returns:
+        The raw bytes for that frame range. Empty bytes if
+        `start_idx >= end_idx`. This output is itself a decodable MP3
+        stream (no container/ID3 wrapper), byte-identical to the
+        corresponding span of the original file.
+
+    Raises:
+        ValueError: `frames` is empty.
+        IndexError: `start_idx` or `end_idx` is out of range for `frames`.
+    """
+    if not frames:
+        raise ValueError("slice_bytes() requires a non-empty frame list")
     if start_idx >= end_idx:
         return b""
     start = frames[start_idx].offset
@@ -223,14 +333,27 @@ def slice_bytes(data: bytes, frames: list[Frame], start_idx: int, end_idx: int) 
 
 @dataclass(frozen=True)
 class AudioStream:
+    """Parsed MP3 stream with located frames and gapless metadata.
+
+    Attributes:
+        data: The complete file bytes this AudioStream was parsed from.
+        frames: List of located MPEG Layer III frames, in file order,
+            excluding any VBR header frame. start_ms of the first frame is 0.
+        encoder_delay_samples: Gapless playback trim from a LAME encoder tag,
+            in samples at the stream's own sample rate — informational only.
+            Frame boundaries (and therefore where splits can land) are
+            unaffected: real players skip this many samples at the start,
+            but split output is fresh audio starting exactly at a frame
+            boundary with no delay semantics of its own to carry over.
+        encoder_padding_samples: Gapless playback trim from a LAME encoder
+            tag, in samples at the stream's own sample rate — informational
+            only. Real players stop this many samples early, but split
+            output is fresh audio with no padding semantics to carry over.
+        sample_rate: Audio sample rate in Hz (e.g. 44100, 48000).
+    """
+
     data: bytes
     frames: list[Frame]
-    # Gapless playback trim from a LAME encoder tag, in samples at the
-    # stream's own sample rate — informational only. Frame boundaries (and
-    # therefore where splits can land) are unaffected: real players skip
-    # `encoder_delay` samples at the start and stop `encoder_padding` samples
-    # early, but split output is fresh audio starting exactly at a frame
-    # boundary, with no delay/padding semantics of its own to carry over.
     encoder_delay_samples: int
     encoder_padding_samples: int
     sample_rate: int
@@ -247,6 +370,30 @@ class AudioStream:
 
 
 def load_audio_stream(path: Path) -> AudioStream:
+    """Load an MP3 file and parse all its frames for frame-accurate splitting.
+
+    Opens and reads the file, scans it for MPEG Layer III frames (skipping
+    any leading ID3v2 tag), and extracts gapless playback metadata if a
+    LAME encoder tag is present in the VBR header frame. The VBR header
+    frame itself (if found) is excluded from the returned frames list, so
+    AudioStream.frames contains only real audio data and start_ms of the
+    first frame is 0.
+
+    Args:
+        path: Path to an MP3 file on disk.
+
+    Returns:
+        An AudioStream containing the file's bytes, parsed frames, extracted
+        gapless metadata, and sample rate. The returned AudioStream.frames
+        is ready for use with frame_index_at and slice_bytes for frame-
+        accurate splitting.
+
+    Raises:
+        UnsupportedMp3Error: No valid MPEG Layer III frame was found in the
+            file, or the file consists only of a VBR header frame with no
+            real audio data after it.
+        FileNotFoundError: The file at `path` does not exist.
+    """
     data = path.read_bytes()
     raw_frames = iter_frames(data)
 
