@@ -26,6 +26,14 @@ const config: Config = {
 
   onBrokenLinks: 'throw',
 
+  scripts: [
+    {
+      src: 'https://static.cloudflareinsights.com/beacon.min.js',
+      type: 'module',
+      'data-cf-beacon': '{"token": "911a5ab21940492ebb33fbd4fc895af5"}',
+    },
+  ],
+
   // Even if you don't use internationalization, you can use this field to set
   // useful metadata like html lang. For example, if your site is Chinese, you
   // may want to replace "en" with "zh-Hans".
