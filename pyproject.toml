@@ -1,6 +1,6 @@
 [project]
 name = "waxcut"
-version = "0.2.1"
+version = "0.3.0"
 description = "Frame-accurate, lossless MP3 splitting and duration parsing in pure Python — no ffmpeg, no subprocess, no decode step."
 readme = "README.md"
 license = "Apache-2.0"
