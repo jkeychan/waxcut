@@ -212,6 +212,97 @@ def id3v2_size(data: bytes) -> int:
     return _ID3V2_HEADER_SIZE + size
 
 
+_ID3V2_TAG_VERSION = b"\x03\x00"  # ID3v2.3.0 -- see plan doc for why not 2.4
+_ID3V2_FRAME_HEADER_SIZE = 10
+_LATIN1_ENCODING_BYTE = b"\x00"
+_UTF16_ENCODING_BYTE = b"\x01"
+_UTF16_LE_BOM = b"\xff\xfe"
+
+
+def _syncsafe(n: int) -> bytes:
+    """Encode `n` as a 4-byte ID3v2 syncsafe integer (7 significant bits/byte)."""
+    if not 0 <= n < (1 << 28):
+        raise ValueError(f"{n} does not fit in a 4-byte ID3v2 syncsafe integer (max {(1 << 28) - 1})")
+    return bytes(((n >> shift) & 0x7F) for shift in (21, 14, 7, 0))
+
+
+def _encode_text(text: str) -> bytes:
+    """ID3v2.3 text-frame content: 1-byte encoding flag + encoded text.
+
+    Latin-1 (encoding byte 0x00) when the text is representable in it --
+    the common case, and the most compact. UTF-16 with an explicit
+    little-endian BOM (encoding byte 0x01) otherwise. UTF-8 (encoding byte
+    0x03) is a v2.4-only addition and is invalid in a v2.3 tag, which is
+    why this doesn't just always use UTF-8.
+    """
+    try:
+        return _LATIN1_ENCODING_BYTE + text.encode("latin-1")
+    except UnicodeEncodeError:
+        return _UTF16_ENCODING_BYTE + _UTF16_LE_BOM + text.encode("utf-16-le")
+
+
+def _text_frame(frame_id: bytes, text: str) -> bytes:
+    """One complete ID3v2.3 text frame: 10-byte frame header + encoded content."""
+    content = _encode_text(text)
+    # v2.3 frame sizes are plain big-endian (NOT syncsafe -- that's v2.4 only).
+    size = struct.pack(">I", len(content))
+    flags = b"\x00\x00"
+    return frame_id + size + flags + content
+
+
+def write_id3v2_tag(
+    data: bytes,
+    *,
+    title: str | None = None,
+    artist: str | None = None,
+    track: int | None = None,
+) -> bytes:
+    """Prepend a fresh, minimal ID3v2.3 tag onto `data`.
+
+    Writes TIT2 (title), TPE1 (artist), and TRCK (track number) frames --
+    whichever of the three fields are given -- with no padding and no
+    footer. Intended for `data` that has no leading ID3v2 tag of its own,
+    which is always true of slice_bytes/split_at output (see their
+    docstrings): this function does not detect, strip, or merge with a
+    pre-existing tag, it only ever prepends a new one.
+
+    Args:
+        data: Bytes to tag, typically the output of slice_bytes or one
+            element of split_at's return value. Coerced to bytes via
+            bytes(data) before concatenation, so a memoryview or other
+            bytes-like object is also accepted.
+        title: Track title (TIT2), or None to omit that frame.
+        artist: Track artist (TPE1), or None to omit that frame.
+        track: Track number (TRCK), written as str(track) with no
+            "N/total" support in this version, or None to omit that
+            frame.
+
+    Returns:
+        A new bytes object: the ID3v2.3 tag followed immediately by
+        `data`, unmodified.
+
+    Raises:
+        ValueError: `track` is given and is less than 1, or the combined
+            size of the requested frames does not fit in a 4-byte ID3v2
+            syncsafe integer (the ~256 MB tag-size ceiling the format
+            itself imposes -- effectively unreachable for title/artist/
+            track text, but guarded rather than silently overflowing).
+    """
+    if track is not None and track < 1:
+        raise ValueError(f"write_id3v2_tag() requires track >= 1, got {track}")
+
+    frame_bytes = b""
+    if title is not None:
+        frame_bytes += _text_frame(b"TIT2", title)
+    if artist is not None:
+        frame_bytes += _text_frame(b"TPE1", artist)
+    if track is not None:
+        frame_bytes += _text_frame(b"TRCK", str(track))
+
+    header = b"ID3" + _ID3V2_TAG_VERSION + b"\x00" + _syncsafe(len(frame_bytes))
+    return header + frame_bytes + bytes(data)
+
+
 def _parse_header(data: bytes, offset: int) -> tuple[MpegVersion, int, int, int] | None:
     """Return (version, bitrate_kbps, sample_rate, padding) for a valid Layer III header, else None."""
     if offset + 4 > len(data):
