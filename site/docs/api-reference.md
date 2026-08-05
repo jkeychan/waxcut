@@ -406,7 +406,7 @@ track.
 ## `scan_frames`
 
 ```python
-def scan_frames(data: bytes) -> Frames
+def scan_frames(data: bytes, *, max_size: int | None = None) -> Frames
 ```
 
 Scans `data` for MPEG Layer III audio frames, skipping any leading ID3v2
@@ -426,6 +426,11 @@ not `scan_frames`'s.
 
 **Args**
 - `data` (`bytes`) — raw file bytes.
+- `max_size` (`int | None`, keyword-only, default `None`) — maximum
+  allowed size in bytes; `None` means the default 250 MB cap.
+  [`load_audio_stream`](#load_audio_stream) uses this internally to apply
+  its own larger 2 GB cap when called with `use_mmap=True`. Most callers
+  should leave this at the default.
 
 **Returns**
 - [`Frames`](#frames) — never empty.
@@ -435,7 +440,7 @@ not `scan_frames`'s.
   in `data`. This covers both non-MP3 input and files containing only
   Layer I/II frames, which this parser doesn't recognize (see
   [How It Works](./how-it-works.md#why-layer-iii-are-out-of-scope)).
-- `FileTooLargeError` — `data` exceeds 250 MB. See
+- `FileTooLargeError` — `data` exceeds `max_size` (250 MB by default). See
   [Security](./security.md#resource-limits).
 
 ## `id3v2_size`

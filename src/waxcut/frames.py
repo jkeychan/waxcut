@@ -87,14 +87,28 @@ class UnsupportedMp3Error(ValueError):
 # cost bounded. See SECURITY.md for the full threat-model note.
 _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
 
-# See Task 3 in the full plan for full rationale; this constant is
-# introduced here since load_audio_stream references it, even though its
-# own dedicated tests land in a later task.
+# use_mmap=True doesn't load the whole file into a Python bytes object, so
+# the memory-amplification rationale behind _MAX_FILE_SIZE_BYTES doesn't
+# apply here -- but scan_frames' worst-case adversarial cost is still O(n)
+# in wall-clock time regardless of what backs `data` (measured: ~150 MB/s
+# against a 20.6MB file of minimum-size MPEG2.5 frames, mmap vs. bytes
+# showed no meaningful throughput difference -- see SECURITY.md). This
+# cap bounds a single call's time cost, not its memory cost. 2 GiB
+# comfortably covers the motivating case (a 6-hour DJ set at a generous
+# 320kbps CBR is ~824MB) while keeping worst-case scan time under ~15s.
+#
+# Must stay under 4 GiB: frame offsets are stored in an array("I") (4-byte
+# unsigned int, max ~4.29 GB) in scan_frames below -- raising this cap past
+# that would silently overflow there.
 _MAX_MMAP_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 
 
 class FileTooLargeError(UnsupportedMp3Error):
-    """Raised when input exceeds _MAX_FILE_SIZE_BYTES.
+    """Raised when input exceeds the applicable size limit.
+
+    The default limit is _MAX_FILE_SIZE_BYTES (250 MB); load_audio_stream
+    applies the larger _MAX_MMAP_FILE_SIZE_BYTES (2 GB) instead when called
+    with use_mmap=True.
 
     A subclass of UnsupportedMp3Error, so existing `except
     UnsupportedMp3Error` handlers still catch it -- but it's a distinct
@@ -309,7 +323,7 @@ def write_id3v2_tag(
     return header + frame_bytes + bytes(data)
 
 
-def _parse_header(data: bytes, offset: int) -> tuple[MpegVersion, int, int, int] | None:
+def _parse_header(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVersion, int, int, int] | None:
     """Return (version, bitrate_kbps, sample_rate, padding) for a valid Layer III header, else None."""
     if offset + 4 > len(data):
         return None
@@ -352,7 +366,7 @@ def _has_crc(header: int) -> bool:
     return protection_bit == 0
 
 
-def _vbr_header_tag_offset(data: bytes, frame: Frame, version: MpegVersion) -> int | None:
+def _vbr_header_tag_offset(data: bytes | mmap.mmap, frame: Frame, version: MpegVersion) -> int | None:
     """Byte offset (relative to `frame.offset`) of a Xing/Info/VBRI tag, if this frame is one."""
     header = struct.unpack_from(">I", data, frame.offset)[0]
     side_info = _SIDE_INFO_SIZE[(version, _is_mono(header))]
@@ -368,7 +382,7 @@ _LAME_DELAY_PADDING_SIZE = 3  # bytes holding two packed 12-bit fields
 _TWELVE_BIT_FIELD_LIMIT = 4096
 
 
-def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
+def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
     """Extract (encoder_delay_samples, encoder_padding_samples) from a LAME extension tag, if present."""
     pos = frame.offset + tag_offset
     flags = struct.unpack_from(">I", data, pos + 4)[0]
@@ -400,7 +414,7 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
     return delay, padding
 
 
-def scan_frames(data: bytes, *, max_size: int | None = None) -> Frames:
+def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Frames:
     """Scan raw MP3 bytes and return every located frame, in order.
 
     Skips a leading ID3v2 tag if present. Includes the Xing/Info/VBRI
@@ -412,8 +426,11 @@ def scan_frames(data: bytes, *, max_size: int | None = None) -> Frames:
         data: Raw file bytes. Any bytes-like object indexable/sliceable
             the same way as bytes is accepted; a plain bytes object is
             the tested and expected case.
-        max_size: Maximum allowed size in bytes. Defaults to _MAX_FILE_SIZE_BYTES
-            (250 MB); pass _MAX_MMAP_FILE_SIZE_BYTES when scanning mmap-backed data.
+        max_size: Maximum allowed size in bytes. Defaults to 250 MB, the
+            same cap load_audio_stream applies by default; pass a larger
+            value to override it (load_audio_stream does this internally
+            to apply its own, larger 2 GB cap when called with
+            use_mmap=True). Most callers should leave this at the default.
 
     Returns:
         A Frames sequence in file order, each with byte offset/length and
@@ -542,7 +559,7 @@ def frame_index_at(frames: Sequence[Frame], target_ms: float) -> int:
     return max(idx, 0)
 
 
-def slice_bytes(data: bytes, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes:
+def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes:
     """Byte range covering frames[start_idx:end_idx], contiguous.
 
     This is a plain byte-copy, not a re-parse: frames are assumed
@@ -707,9 +724,11 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
     file_size = path.stat().st_size
     max_size = _MAX_MMAP_FILE_SIZE_BYTES if use_mmap else _MAX_FILE_SIZE_BYTES
     if file_size > max_size:
-        limit_mb = max_size // (1024 * 1024)
+        mib_per_gib = 1024
+        limit_mb = max_size / (1024 * 1024)
+        limit_str = f"{limit_mb / mib_per_gib:.0f} GB" if limit_mb >= mib_per_gib else f"{limit_mb:.0f} MB"
         raise FileTooLargeError(
-            f"{path} is {file_size} bytes, exceeding the {max_size}-byte ({limit_mb} MB) limit."
+            f"{path} is {file_size} bytes, exceeding the {max_size}-byte ({limit_str}) limit."
         )
 
     data: bytes | mmap.mmap
@@ -755,7 +774,7 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
     except Exception:
         if use_mmap:
             data.close()  # type: ignore[union-attr]
-            file_handle.close()
+            file_handle.close()  # type: ignore[union-attr]
         raise
 
 

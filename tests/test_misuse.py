@@ -2,6 +2,7 @@
 fed malformed MP3 data (see test_frames.py for that side of things)."""
 
 import math
+import mmap
 from pathlib import Path
 
 import pytest
@@ -204,3 +205,37 @@ def test_load_audio_stream_mmap_empty_file_raises_unsupported_not_valueerror(tmp
     # and the non-mmap path already does the same -- lock in parity
     with pytest.raises(waxcut.UnsupportedMp3Error):
         waxcut.load_audio_stream(empty, use_mmap=False)
+
+
+def test_load_audio_stream_mmap_garbage_input_closes_file_and_mmap_on_parse_failure(monkeypatch):
+    # Regression test for the mmap error path: a parse failure on
+    # attacker-controlled bytes must still close the mmap and file handle
+    # before re-raising (see load_audio_stream's `except Exception` block).
+    # Spying on Path.open/mmap.mmap to hold our own strong references is
+    # essential here -- without it, CPython's refcounting GC closes the
+    # mmap/file via their own __del__ as soon as load_audio_stream's local
+    # variables go out of scope, which would make a naive
+    # "no fd leaked" check pass even with the explicit close() calls
+    # removed (verified empirically).
+    captured: dict[str, object] = {}
+    real_open = Path.open
+    real_mmap_ctor = mmap.mmap
+
+    def spy_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        captured["file_handle"] = handle
+        return handle
+
+    def spy_mmap(*args, **kwargs):
+        mapped = real_mmap_ctor(*args, **kwargs)
+        captured["mmap"] = mapped
+        return mapped
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    monkeypatch.setattr(mmap, "mmap", spy_mmap)
+
+    with pytest.raises(waxcut.UnsupportedMp3Error):
+        waxcut.load_audio_stream(FIXTURES / "not_an_mp3.txt", use_mmap=True)
+
+    assert captured["file_handle"].closed
+    assert captured["mmap"].closed
