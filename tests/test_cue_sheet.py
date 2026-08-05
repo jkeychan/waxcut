@@ -33,6 +33,9 @@ def test_parse_msf_converts_correctly(token, expected_ms):
         "00:60:00",  # seconds out of range (0-59)
         "00:00:75",  # frame out of range (0-74)
         "",  # empty
+        "-1:00:00",  # negative minutes
+        "-1:99:00",  # negative minutes, invalid seconds too -- minutes must be reported first
+        "9999999:00:00",  # minutes over _MAX_MINUTES_FIELD
     ],
 )
 def test_parse_msf_rejects_malformed_or_out_of_range(token):
@@ -40,6 +43,20 @@ def test_parse_msf_rejects_malformed_or_out_of_range(token):
         assert _parse_msf(token, lineno=1) == 0.0
         return
     with pytest.raises(CueSheetError, match=r"line 1"):
+        _parse_msf(token, lineno=1)
+
+
+def test_parse_msf_rejects_negative_minutes_with_specific_message():
+    with pytest.raises(CueSheetError, match="invalid minutes field"):
+        _parse_msf("-1:00:00", lineno=1)
+
+
+def test_parse_msf_rejects_oversized_minutes_field_not_overflowerror():
+    # Reproduces the reviewer's crash case: a few-hundred-digit minutes
+    # field used to blow past int-to-float conversion range and raise a
+    # raw OverflowError instead of CueSheetError.
+    token = "9" * 400 + ":00:00"
+    with pytest.raises(CueSheetError, match="invalid minutes field"):
         _parse_msf(token, lineno=1)
 
 
@@ -140,6 +157,14 @@ def test_parse_cue_sheet_rejects_multi_file():
 def test_parse_cue_sheet_rejects_track_missing_index_01():
     text = 'FILE "x.mp3" MP3\n  TRACK 01 AUDIO\n    INDEX 00 00:00:00\n'
     with pytest.raises(waxcut.CueSheetError, match="no INDEX 01"):
+        waxcut.parse_cue_sheet(text)
+
+
+def test_parse_cue_sheet_rejects_oversized_minutes_field():
+    # Full-pipeline version of the reviewer's crash reproduction: this used
+    # to raise an uncaught OverflowError instead of CueSheetError.
+    text = 'FILE "x" MP3\n TRACK 01 AUDIO\n  INDEX 01 ' + "9" * 400 + ":00:00\n"
+    with pytest.raises(waxcut.CueSheetError, match="invalid minutes field"):
         waxcut.parse_cue_sheet(text)
 
 

@@ -14,6 +14,7 @@ _MS_PER_SECOND = 1000
 _MSF_FIELDS = 3  # MM:SS:FF has exactly 3 fields
 _MAX_SECONDS_FIELD = 60  # exclusive upper bound: valid range is 0-59
 _MAX_FRAME_FIELD = _CD_FRAMES_PER_SECOND  # exclusive upper bound: valid range is 0-74
+_MAX_MINUTES_FIELD = 1_000_000  # inclusive upper bound: keeps the ms conversion within float range
 
 
 class CueSheetError(ValueError):
@@ -42,8 +43,9 @@ def _parse_msf(token: str, lineno: int) -> float:
 
     Raises:
         CueSheetError: `token` isn't exactly 3 colon-separated fields,
-            any field isn't a base-10 integer, seconds is outside 0-59,
-            or the frame field is outside 0-74.
+            any field isn't a base-10 integer, minutes is negative or
+            exceeds `_MAX_MINUTES_FIELD`, seconds is outside 0-59, or
+            the frame field is outside 0-74.
     """
     fields = token.split(":")
     if len(fields) != _MSF_FIELDS:
@@ -54,14 +56,16 @@ def _parse_msf(token: str, lineno: int) -> float:
         raise CueSheetError(
             f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF, all fields numeric)"
         ) from None
+    if not (0 <= minutes <= _MAX_MINUTES_FIELD):
+        raise CueSheetError(
+            f"line {lineno}: {token!r} has an invalid minutes field (must be 0-{_MAX_MINUTES_FIELD})"
+        )
     if not (0 <= seconds < _MAX_SECONDS_FIELD):
         raise CueSheetError(f"line {lineno}: {token!r} out of range (seconds must be 0-59)")
     if not (0 <= frames < _MAX_FRAME_FIELD):
         raise CueSheetError(
             f"line {lineno}: {token!r} out of range (frame field must be 0-74 at 75 frames/sec)"
         )
-    if minutes < 0:
-        raise CueSheetError(f"line {lineno}: {token!r} has a negative minutes field")
     total_seconds = minutes * _SECONDS_PER_MINUTE + seconds
     return total_seconds * _MS_PER_SECOND + frames * _MS_PER_SECOND / _CD_FRAMES_PER_SECOND
 
@@ -132,6 +136,7 @@ def parse_cue_sheet(text: str) -> list[float]:
     in_audio_track = False
     current_track_number = "?"
     have_index01_for_current_track = False
+    lineno = 0
 
     def _check_track_closed(lineno: int) -> None:
         if in_audio_track and not have_index01_for_current_track:
@@ -165,7 +170,7 @@ def parse_cue_sheet(text: str) -> list[float]:
         # PREGAP/POSTGAP, and INDEX lines outside an AUDIO track, or with
         # an index number other than 01 -- all intentionally ignored.
 
-    _check_track_closed(lineno=len(text.splitlines()))
+    _check_track_closed(lineno=lineno)
 
     if not timestamps:
         raise CueSheetError("no audio TRACK/INDEX 01 entries found in cue sheet text")
