@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/waxcut.svg)](pyproject.toml)
 
-Frame-accurate, lossless MP3 splitting and duration parsing in pure Python —
+Frame-accurate, lossless MP3 splitting and duration parsing in pure Python with
 no ffmpeg, no subprocess, no decode step.
 
 Cuts are made by parsing the file's own MPEG frame headers and byte-copying
