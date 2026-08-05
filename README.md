@@ -25,11 +25,11 @@ uv add waxcut
 
 ## Usage
 
-Quick duration check from the shell, no script needed — replace `song.mp3`
-at the end with the path to your own file and run it as-is:
+Quick duration check from the shell, no script needed — replace `'song.mp3'`
+below (keep the quotes) with the path to your own file and run it as-is:
 
 ```bash
-python -c "from pathlib import Path; from waxcut import load_audio_stream as l; import sys; print(f'{l(Path(sys.argv[1])).playable_duration_ms / 1000:.1f}s')" song.mp3
+python -c "from pathlib import Path; from waxcut import load_audio_stream as l; print(round(l(Path('song.mp3')).playable_duration_ms / 1000, 1), 's')"
 ```
 
 For actually splitting a file, here's the full pattern — load it once, then
