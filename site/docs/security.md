@@ -60,13 +60,41 @@ itself.
 
 That removes amplification as a concern, but a single call still costs
 real, bounded time and memory proportional to input size — `scan_frames`
-and `load_audio_stream` both reject input over **250 MB**, raising
-[`FileTooLargeError`](./api-reference.md#filetoolargeerror), so a single
-call's worst-case cost stays bounded regardless. A `load_audio_stream` call
-checks the file's size on disk *before* reading it, so an oversized file is
-never fully loaded into memory in the first place. This isn't currently a
-configurable parameter — if your use case legitimately needs to process
-larger files, please
+and `load_audio_stream` both reject input over **250 MB** by default,
+raising [`FileTooLargeError`](./api-reference.md#filetoolargeerror), so a
+single call's worst-case cost stays bounded regardless. A `load_audio_stream`
+call checks the file's size on disk *before* reading it, so an oversized
+file is never fully loaded into memory in the first place.
+
+`load_audio_stream(path, use_mmap=True)` changes that calculus. Instead of
+reading the file into a Python `bytes` object, it memory-maps it, so the
+250 MB default's memory-cost rationale doesn't apply — the file's bytes
+are never materialized in Python's heap in the first place, the OS pages
+them in on demand. What still applies is *time*: parsing is O(n) in file
+size no matter what backs the bytes, so a large enough mmap'd file still
+costs real wall-clock time to scan. `use_mmap=True` is therefore governed
+by its own, larger **2 GB** limit, sized to bound that worst-case scan time
+rather than memory — measured at roughly **150 MB/s** against the same
+adversarial construction described above (a file packed edge-to-edge with
+minimum-size MPEG2.5 frames), so a 2 GB adversarial input costs on the
+order of ten seconds to scan rather than being unbounded.
+
+Because the file stays memory-mapped for as long as the `AudioStream` is
+alive, callers using `use_mmap=True` are responsible for calling
+`AudioStream.close()` (or using it as a context manager) when they're done
+with it — unlike the non-mmap path, where the file handle is closed once
+the bytes are read, the mmap'd file's handle stays open for the
+`AudioStream`'s whole lifetime.
+
+`use_mmap=True` is exercised in CI on Linux only — the [`ci.yml`](https://github.com/jkeychan/waxcut/actions/workflows/ci.yml)
+workflow runs exclusively on `ubuntu-latest`, so the mmap code path isn't
+independently verified on Windows or macOS. `mmap`'s underlying semantics
+differ enough across platforms (page-alignment behavior, file-locking
+interaction, close-on-exec) that this is worth calling out explicitly
+rather than assuming portability.
+
+Neither limit is currently a configurable parameter — if your use case
+legitimately needs to process larger files, please
 [open an issue](https://github.com/jkeychan/waxcut/issues/new) rather than
 relying on undocumented internals to work around it.
 

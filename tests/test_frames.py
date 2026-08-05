@@ -1,5 +1,6 @@
 import contextlib
 import itertools
+import mmap
 import shutil
 import struct
 import subprocess
@@ -211,3 +212,25 @@ def test_lame_gapless_tag_found_when_frame_is_crc_protected(tmp_path):
     stream = waxcut.load_audio_stream(synthetic_mp3)
     assert stream.encoder_delay_samples == delay
     assert stream.encoder_padding_samples == padding
+
+
+def test_load_audio_stream_use_mmap_produces_identical_frames(fixture_path):
+    normal = waxcut.load_audio_stream(fixture_path)
+    with waxcut.load_audio_stream(fixture_path, use_mmap=True) as mmapped:
+        assert len(mmapped.frames) == len(normal.frames)
+        assert list(mmapped.frames) == list(normal.frames)
+        assert mmapped.sample_rate == normal.sample_rate
+        assert mmapped.encoder_delay_samples == normal.encoder_delay_samples
+        assert mmapped.encoder_padding_samples == normal.encoder_padding_samples
+        assert bytes(mmapped.data[:]) == normal.data
+        assert isinstance(mmapped.data, mmap.mmap)
+
+
+def test_load_audio_stream_use_mmap_split_output_matches_non_mmap(fixture_path):
+    normal = waxcut.load_audio_stream(fixture_path)
+    with waxcut.load_audio_stream(fixture_path, use_mmap=True) as mmapped:
+        cut_idx = len(mmapped.frames) // 2
+        mmap_first_half = waxcut.slice_bytes(mmapped.data, mmapped.frames, 0, cut_idx)
+        normal_first_half = waxcut.slice_bytes(normal.data, normal.frames, 0, cut_idx)
+        assert mmap_first_half == normal_first_half
+        assert isinstance(mmap_first_half, bytes)

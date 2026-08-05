@@ -2,6 +2,7 @@
 fed malformed MP3 data (see test_frames.py for that side of things)."""
 
 import math
+import mmap
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,20 @@ def test_slice_bytes_rejects_negative_indices():
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURE_NAMES = [
+    "cbr_stereo.mp3",
+    "cbr_mono.mp3",
+    "vbr_stereo.mp3",
+    "lame_vbr_stereo.mp3",
+    "mono_8khz.mp3",
+    "joint_stereo_vbr.mp3",
+    "with_id3v1_trailer.mp3",
+]
+
+
+@pytest.fixture(params=FIXTURE_NAMES)
+def fixture_path(request) -> Path:
+    return FIXTURES / request.param
 
 
 def test_load_audio_stream_missing_file_raises_file_not_found():
@@ -134,3 +149,93 @@ def test_write_id3v2_tag_syncsafe_guard_rejects_oversized_frame_payload():
     huge_title = "x" * (1 << 28)
     with pytest.raises(ValueError, match=r"syncsafe|fit"):
         waxcut.write_id3v2_tag(b"data", title=huge_title)
+
+
+def test_audio_stream_close_is_a_noop_without_mmap(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    stream.close()  # must not raise
+    # data is still fully valid bytes after close() on the non-mmap path
+    assert len(stream.data) > 0
+
+
+def test_audio_stream_context_manager_closes_mmap_on_exit(fixture_path):
+    with waxcut.load_audio_stream(fixture_path, use_mmap=True) as stream:
+        assert not stream.data.closed
+    assert stream.data.closed
+
+
+def test_audio_stream_mmap_close_is_idempotent(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path, use_mmap=True)
+    stream.close()
+    stream.close()  # must not raise on a second close
+
+
+def test_audio_stream_context_manager_closes_on_exception(fixture_path):
+    with pytest.raises(RuntimeError), waxcut.load_audio_stream(fixture_path, use_mmap=True) as stream:
+        raise RuntimeError("boom")
+    assert stream.data.closed
+
+
+def test_load_audio_stream_mmap_allows_files_larger_than_the_default_cap(monkeypatch):
+    # Confirms use_mmap=True is governed by the separate, larger cap, not
+    # the default 250MB one -- shrink both caps so the test doesn't need to
+    # allocate real multi-GB files.
+    monkeypatch.setattr("waxcut.frames._MAX_FILE_SIZE_BYTES", 10)
+    monkeypatch.setattr("waxcut.frames._MAX_MMAP_FILE_SIZE_BYTES", 1_000_000)
+    fixture = FIXTURES / "cbr_stereo.mp3"  # comfortably between 10 bytes and 1MB
+    with pytest.raises(waxcut.FileTooLargeError):
+        waxcut.load_audio_stream(fixture)  # default cap still applies
+    with waxcut.load_audio_stream(fixture, use_mmap=True) as stream:  # mmap cap doesn't
+        assert len(stream.frames) > 0
+
+
+def test_load_audio_stream_mmap_rejects_input_over_its_own_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr("waxcut.frames._MAX_MMAP_FILE_SIZE_BYTES", 10)
+    oversized = tmp_path / "too_big.mp3"
+    oversized.write_bytes(b"\x00" * 11)
+    with pytest.raises(waxcut.FileTooLargeError):
+        waxcut.load_audio_stream(oversized, use_mmap=True)
+
+
+def test_load_audio_stream_mmap_empty_file_raises_unsupported_not_valueerror(tmp_path):
+    empty = tmp_path / "empty.mp3"
+    empty.write_bytes(b"")
+    with pytest.raises(waxcut.UnsupportedMp3Error):
+        waxcut.load_audio_stream(empty, use_mmap=True)
+    # and the non-mmap path already does the same -- lock in parity
+    with pytest.raises(waxcut.UnsupportedMp3Error):
+        waxcut.load_audio_stream(empty, use_mmap=False)
+
+
+def test_load_audio_stream_mmap_garbage_input_closes_file_and_mmap_on_parse_failure(monkeypatch):
+    # Regression test for the mmap error path: a parse failure on
+    # attacker-controlled bytes must still close the mmap and file handle
+    # before re-raising (see load_audio_stream's `except Exception` block).
+    # Spying on Path.open/mmap.mmap to hold our own strong references is
+    # essential here -- without it, CPython's refcounting GC closes the
+    # mmap/file via their own __del__ as soon as load_audio_stream's local
+    # variables go out of scope, which would make a naive
+    # "no fd leaked" check pass even with the explicit close() calls
+    # removed (verified empirically).
+    captured: dict[str, object] = {}
+    real_open = Path.open
+    real_mmap_ctor = mmap.mmap
+
+    def spy_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        captured["file_handle"] = handle
+        return handle
+
+    def spy_mmap(*args, **kwargs):
+        mapped = real_mmap_ctor(*args, **kwargs)
+        captured["mmap"] = mapped
+        return mapped
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    monkeypatch.setattr(mmap, "mmap", spy_mmap)
+
+    with pytest.raises(waxcut.UnsupportedMp3Error):
+        waxcut.load_audio_stream(FIXTURES / "not_an_mp3.txt", use_mmap=True)
+
+    assert captured["file_handle"].closed
+    assert captured["mmap"].closed
