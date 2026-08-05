@@ -108,3 +108,29 @@ def test_load_audio_stream_rejects_file_over_the_size_limit(tmp_path, monkeypatc
     oversized.write_bytes(b"\x00" * 11)
     with pytest.raises(waxcut.FileTooLargeError):
         waxcut.load_audio_stream(oversized)
+
+
+def test_write_id3v2_tag_rejects_track_below_one():
+    with pytest.raises(ValueError, match="track"):
+        waxcut.write_id3v2_tag(b"data", track=0)
+    with pytest.raises(ValueError, match="track"):
+        waxcut.write_id3v2_tag(b"data", track=-5)
+
+
+def test_write_id3v2_tag_accepts_memoryview_input():
+    # slice_bytes always returns real bytes today, but write_id3v2_tag
+    # coerces via bytes(data) defensively -- see the plan doc's
+    # Compatibility section (issue #28, streaming/mmap support) for why.
+    tagged = waxcut.write_id3v2_tag(memoryview(b"payload"), title="T")
+    assert tagged.endswith(b"payload")
+    assert isinstance(tagged, bytes)
+
+
+def test_write_id3v2_tag_syncsafe_guard_rejects_oversized_frame_payload():
+    # A pathologically large title is real user-input misuse (a caller
+    # passing e.g. an entire file's contents as "title" by mistake), not
+    # a scenario the format itself can represent -- syncsafe size is
+    # capped at 2**28 - 1.
+    huge_title = "x" * (1 << 28)
+    with pytest.raises(ValueError, match=r"syncsafe|fit"):
+        waxcut.write_id3v2_tag(b"data", title=huge_title)

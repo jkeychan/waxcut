@@ -9,6 +9,16 @@ frames, so output is bit-identical to the source — just shorter.
     stream = load_audio_stream(Path("song.mp3"))
     cut_at = frame_index_at(stream.frames, target_ms=90_000)
     first_half = slice_bytes(stream.data, stream.frames, 0, cut_at)
+
+Splitting an album into tagged tracks:
+
+    from waxcut import load_audio_stream, split_at, write_id3v2_tag
+
+    stream = load_audio_stream(Path("album.mp3"))
+    segments = split_at(stream, timestamps_ms=[cut1_ms, cut2_ms])
+    for i, segment in enumerate(segments, start=1):
+        tagged = write_id3v2_tag(segment, title=f"Track {i}", track=i)
+        Path(f"track{i}.mp3").write_bytes(tagged)
 """
 
 from importlib.metadata import PackageNotFoundError
@@ -27,6 +37,7 @@ from waxcut.frames import (
     slice_bytes,
     split_at,
     total_duration_ms,
+    write_id3v2_tag,
 )
 
 try:
@@ -51,4 +62,5 @@ __all__ = [
     "slice_bytes",
     "split_at",
     "total_duration_ms",
+    "write_id3v2_tag",
 ]
