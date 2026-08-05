@@ -24,6 +24,7 @@ Splitting an album into tagged tracks:
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
+from waxcut.cue import CueSheetError, parse_cue_sheet
 from waxcut.frames import (
     AudioStream,
     FileTooLargeError,
@@ -51,6 +52,7 @@ except PackageNotFoundError:
 
 __all__ = [
     "AudioStream",
+    "CueSheetError",
     "FileTooLargeError",
     "Frame",
     "UnsupportedMp3Error",
@@ -58,6 +60,7 @@ __all__ = [
     "id3v2_size",
     "join_frames",
     "load_audio_stream",
+    "parse_cue_sheet",
     "scan_frames",
     "slice_bytes",
     "split_at",
