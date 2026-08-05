@@ -10,7 +10,7 @@ names are importable directly from the top-level `waxcut` package.
 ## `load_audio_stream`
 
 ```python
-def load_audio_stream(path: Path) -> AudioStream
+def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream
 ```
 
 Loads an MP3 file and parses it into an [`AudioStream`](#audiostream) ready
@@ -24,8 +24,22 @@ list, every remaining frame's `start_ms` is rebased so the first real audio
 frame starts at 0, and — if the header carries a LAME gapless extension —
 `encoder_delay_samples`/`encoder_padding_samples` are extracted from it.
 
+Pass `use_mmap=True` to memory-map the file instead of reading it into a
+`bytes` object — the file's bytes are never fully materialized in memory,
+which matters for a multi-hour file. `AudioStream.data` is then an
+`mmap.mmap` rather than `bytes` (every function here that accepts `data`
+works identically with either), and the file is kept open for the
+`AudioStream`'s whole lifetime — call `AudioStream.close()` (or use it as a
+context manager) when done with it. `use_mmap=True` is governed by its own,
+larger 2 GB size cap rather than the 250 MB default. See
+[Security](./security.md#resource-limits) for the rationale behind both
+limits.
+
 **Args**
 - `path` (`Path`) — path to an MP3 file on disk.
+- `use_mmap` (`bool`, keyword-only, default `False`) — if `True`,
+  memory-map the file instead of reading it into a `bytes` object; see
+  above.
 
 **Returns**
 - `AudioStream`
@@ -34,9 +48,10 @@ frame starts at 0, and — if the header carries a LAME gapless extension —
 - `UnsupportedMp3Error` — no valid MPEG Layer III frame was found anywhere
   in the file (propagated from `scan_frames`), or the file consists of only
   a VBR header frame with no audio frames after it.
-- `FileTooLargeError` — the file exceeds 250 MB. Checked against the file's
-  size on disk *before* reading it, so an oversized file never gets loaded
-  into memory in the first place. See [Security](./security.md#resource-limits).
+- `FileTooLargeError` — the file exceeds the applicable size limit: 250 MB
+  by default, or 2 GB with `use_mmap=True`. Checked against the file's
+  size on disk *before* opening it, so an oversized file never gets read
+  or mapped in the first place. See [Security](./security.md#resource-limits).
 - `FileNotFoundError` (and other OS-level errors) — propagated from reading
   the file if `path` doesn't exist or can't be opened.
 
@@ -45,7 +60,7 @@ frame starts at 0, and — if the header carries a LAME gapless extension —
 ```python
 @dataclass(frozen=True)
 class AudioStream:
-    data: bytes
+    data: bytes | mmap.mmap
     frames: Frames
     encoder_delay_samples: int
     encoder_padding_samples: int
@@ -57,7 +72,10 @@ constructed via [`load_audio_stream`](#load_audio_stream) rather than
 directly.
 
 **Fields**
-- `data` (`bytes`) — the complete file bytes this stream was parsed from.
+- `data` (`bytes | mmap.mmap`) — the complete file bytes this stream was
+  parsed from, or (if loaded with `use_mmap=True`) an `mmap.mmap` view over
+  them. Every function in this module that accepts `data` (`scan_frames`,
+  `slice_bytes`, etc.) works identically with either.
 - `frames` (`Frames`) — the located frames, in file order, as a
   memory-compact sequence (see [`Frames`](#frames)) that behaves like
   `list[Frame]` — indexing, negative indexing, slicing, iteration, `len()`
@@ -84,6 +102,16 @@ directly.
   report: `duration_ms` minus the gapless delay/padding trim (converted
   from samples to milliseconds via `sample_rate`), clamped to a minimum of
   `0.0`.
+
+**Methods**
+
+- `close() -> None` — releases the mmap and file handle backing `data`, if
+  any. A no-op when this `AudioStream` was loaded without `use_mmap=True`
+  (`data` is a plain, already-materialized `bytes` object with no open file
+  handle to release). Safe to call more than once. `AudioStream` also
+  supports use as a context manager
+  (`with load_audio_stream(path, use_mmap=True) as stream:`), which calls
+  `close()` automatically on exit.
 
 ## `Frame`
 
