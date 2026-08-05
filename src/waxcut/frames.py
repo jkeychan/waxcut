@@ -400,7 +400,7 @@ def _parse_lame_gapless(data: bytes, frame: Frame, tag_offset: int) -> tuple[int
     return delay, padding
 
 
-def scan_frames(data: bytes) -> Frames:
+def scan_frames(data: bytes, *, max_size: int | None = None) -> Frames:
     """Scan raw MP3 bytes and return every located frame, in order.
 
     Skips a leading ID3v2 tag if present. Includes the Xing/Info/VBRI
@@ -412,6 +412,8 @@ def scan_frames(data: bytes) -> Frames:
         data: Raw file bytes. Any bytes-like object indexable/sliceable
             the same way as bytes is accepted; a plain bytes object is
             the tested and expected case.
+        max_size: Maximum allowed size in bytes. Defaults to _MAX_FILE_SIZE_BYTES
+            (250 MB); pass _MAX_MMAP_FILE_SIZE_BYTES when scanning mmap-backed data.
 
     Returns:
         A Frames sequence in file order, each with byte offset/length and
@@ -424,12 +426,12 @@ def scan_frames(data: bytes) -> Frames:
             found anywhere in `data`. This is the correct outcome for
             non-MP3 files, empty input, and Layer I/II files (rejected
             on purpose — see module docstring).
-        FileTooLargeError: `data` exceeds 250 MB. See SECURITY.md.
+        FileTooLargeError: `data` exceeds max_size. See SECURITY.md.
     """
-    if len(data) > _MAX_FILE_SIZE_BYTES:
-        raise FileTooLargeError(
-            f"Input is {len(data)} bytes, exceeding the {_MAX_FILE_SIZE_BYTES}-byte (250 MB) limit."
-        )
+    if max_size is None:
+        max_size = _MAX_FILE_SIZE_BYTES
+    if len(data) > max_size:
+        raise FileTooLargeError(f"Input is {len(data)} bytes, exceeding the {max_size}-byte limit.")
     offset = id3v2_size(data)
     offsets: array = array("I")
     lengths: array = array("I")
@@ -701,7 +703,7 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
         data = path.read_bytes()
 
     try:
-        raw_frames = scan_frames(data)
+        raw_frames = scan_frames(data, max_size=max_size)
         first = raw_frames[0]
         version, _, sample_rate, _ = _parse_header(data, first.offset)
         tag_offset = _vbr_header_tag_offset(data, first, version)
