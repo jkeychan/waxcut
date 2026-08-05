@@ -76,5 +76,28 @@ original Xing/VBRI VBR header, those readers may report an inaccurate
 duration for split VBR tracks. This is a property of how splitting works
 (frame-accurate byte copying), not a bug in `write_id3v2_tag`.
 
+## Splitting an album using a .cue sheet
+
+If you already have a `.cue` sheet for the album (the usual companion to a
+single-file rip), `parse_cue_sheet` turns its `TRACK`/`INDEX 01` entries
+directly into the timestamps `split_at` expects — no need to work out cut
+points by hand:
+
+```python
+from pathlib import Path
+from waxcut import load_audio_stream, parse_cue_sheet, split_at
+
+stream = load_audio_stream(Path("album.mp3"))
+cue_text = Path("album.cue").read_text()
+timestamps = parse_cue_sheet(cue_text)
+tracks = split_at(stream, timestamps)
+
+for i, track in enumerate(tracks, start=1):
+    Path(f"track{i:02d}.mp3").write_bytes(track)
+```
+
+See [API Reference](./api-reference.md#parse_cue_sheet) for the exact cue
+grammar this parses and the errors it raises on malformed input.
+
 See [How It Works](./how-it-works.md) for why this approach is safe, and the
 [API Reference](./api-reference.md) for the full public surface.
