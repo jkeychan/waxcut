@@ -584,13 +584,20 @@ def slice_bytes(data: bytes, frames: Sequence[Frame], start_idx: int, end_idx: i
 class AudioStream:
     """Parsed MP3 stream with located frames and gapless metadata.
 
-    Supports use as a context manager (`with load_audio_stream(...) as
-    stream:`) to release an mmap-backed `data` and its file handle on exit;
-    see close().
+    Normally constructed via load_audio_stream, not directly. Supports use
+    as a context manager (`with load_audio_stream(...) as stream:`) or
+    explicit stream.close() -- required when loaded with use_mmap=True to
+    release the underlying file handle and mmap; a harmless no-op
+    otherwise. Equality/hashing are identity-based (two AudioStreams
+    parsed from the same file are not `==`), regardless of use_mmap --
+    this was already true before use_mmap existed, since AudioStream.frames
+    (a Frames instance) has never supported content-based equality either.
 
     Attributes:
         data: The complete file bytes this AudioStream was parsed from, or
-            an open mmap.mmap over the file if loaded with use_mmap=True.
+            (if loaded with use_mmap=True) an mmap.mmap view over them.
+            Every function in this module that accepts `data` (scan_frames,
+            slice_bytes, etc.) works identically with either.
         frames: Located MPEG Layer III frames, in file order, excluding any
             VBR header frame. start_ms of the first frame is 0.
         encoder_delay_samples: Gapless playback trim from a LAME encoder tag,
@@ -652,27 +659,49 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
     AudioStream.frames contains only real audio data and start_ms of the
     first frame is 0.
 
+    By default (use_mmap=False), the entire file is read into memory as a
+    bytes object before scanning starts -- simple and fast for the common
+    case (songs, short clips), but for a multi-hour file this means holding
+    the whole thing in RAM just to locate frame boundaries.
+
     Args:
         path: Path to an MP3 file on disk.
-        use_mmap: If True, memory-map the file instead of reading it fully
-            into memory. Raises the mmap-specific size limit instead of the
-            default one; call AudioStream.close() (or use it as a context
-            manager) to release the mapping and file handle when done.
+        use_mmap: If True, memory-map the file instead of reading it into a
+            bytes object. AudioStream.data is then an mmap.mmap rather than
+            bytes -- scan_frames/slice_bytes/etc. work identically either
+            way (mmap.mmap supports the same len()/slicing/indexing
+            operations), and slice_bytes's return value is always plain
+            bytes regardless of this flag (a slice of an mmap.mmap is a
+            fresh bytes copy, same as slicing bytes). The file is kept open
+            for the AudioStream's whole lifetime: call AudioStream.close()
+            when done, or use the AudioStream as a context manager
+            (`with load_audio_stream(path, use_mmap=True) as stream:`).
+            Governed by a separate, larger size cap than the default path
+            (2 GB vs. 250 MB) -- see FileTooLargeError below. Not modifying
+            or deleting the file on disk while an AudioStream from this
+            mode is open: on POSIX, deleting it is safe (the mapping keeps
+            working via the file's inode), but modifying it in place is not
+            -- the bytes scan_frames/slice_bytes see could change mid-read.
+            On Windows, deleting or renaming an open-mapped file typically
+            fails outright instead (untested in this repo's CI, which is
+            Linux-only -- see SECURITY.md).
 
     Returns:
-        An AudioStream containing the file's bytes (or an mmap.mmap view of
-        them, if use_mmap=True), parsed frames, extracted gapless metadata,
-        and sample rate. The returned AudioStream.frames is ready for use
-        with frame_index_at and slice_bytes for frame-accurate splitting.
+        An AudioStream containing the file's bytes (or an mmap view of them
+        if use_mmap=True), parsed frames, extracted gapless metadata, and
+        sample rate. The returned AudioStream.frames is ready for use with
+        frame_index_at and slice_bytes for frame-accurate splitting.
 
     Raises:
         UnsupportedMp3Error: No valid MPEG Layer III frame was found in the
             file, or the file consists only of a VBR header frame with no
-            real audio data after it.
-        FileTooLargeError: The file exceeds the applicable size limit.
-            Checked against the file's size on disk before reading it, so
-            an oversized file never gets fully loaded into memory in the
-            first place. See SECURITY.md.
+            real audio data after it, or (use_mmap=True only) the file is
+            empty -- matching the same error the default path raises for
+            an empty file, rather than a platform-specific mmap ValueError.
+        FileTooLargeError: The file exceeds the applicable size limit --
+            250 MB by default, or 2 GB with use_mmap=True. Checked against
+            the file's size on disk before opening it, so an oversized file
+            is never read or mapped in the first place. See SECURITY.md.
         FileNotFoundError: The file at `path` does not exist.
     """
     file_size = path.stat().st_size
@@ -748,7 +777,9 @@ def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
         A list of len(timestamps_ms) + 1 byte segments, in order. Each
         segment is a standalone, decodable MP3 stream, byte-identical to
         the corresponding span of stream.data. Concatenating all segments
-        (see join_frames) reproduces the original audio exactly.
+        (see join_frames) reproduces the original audio exactly. Each
+        segment is fresh, independent bytes — safe to use even after
+        closing an mmap-backed stream (see AudioStream.close()).
     """
     idxs = [0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)]
     return [slice_bytes(stream.data, stream.frames, start, end) for start, end in pairwise(idxs)]
