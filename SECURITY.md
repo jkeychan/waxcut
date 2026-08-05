@@ -32,6 +32,14 @@ built this way — previously ~6x before that storage redesign. See the
 [docs site's Security page](https://waxcut.pages.dev/docs/security#resource-limits)
 for the full writeup and measurement methodology.
 
+`parse_cue_sheet` has no size limit: it takes an already-materialized
+`str`, not a `Path`, so it has no I/O boundary of its own and a cap
+wouldn't bound anything the caller doesn't already control. Cue text
+amplifies further into parsed timestamps than frame parsing does (~3.9x
+measured, vs. ~0.95x above), and 40,000 adversarial/mutated cue inputs run
+through it during testing raised only `CueSheetError` -- never an
+unhandled exception.
+
 ## Reporting a Vulnerability
 
 Please report security vulnerabilities privately using GitHub's

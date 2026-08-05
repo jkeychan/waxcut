@@ -99,5 +99,59 @@ for i, track in enumerate(tracks, start=1):
 See [API Reference](./api-reference.md#parse_cue_sheet) for the exact cue
 grammar this parses and the errors it raises on malformed input.
 
+## Putting it together: cue sheet, split, and tag
+
+Combining the two sections above, a full cue-sheet-driven rip: parse the cue
+sheet, split on its timestamps, and tag each resulting track before writing
+it to disk.
+
+Two `INDEX 01` entries can land on the same MPEG frame boundary (cue sheets
+are timestamped at 1/75-second CD-frame resolution, finer than an MP3
+frame), and a cue sheet can also outrun the actual audio if it doesn't quite
+match the file it's paired with. Both produce an empty `split_at` segment,
+which `write_id3v2_tag` will happily tag into a file containing nothing but
+a tag header — one `waxcut` itself refuses to load back in. Skip empty
+segments rather than writing them:
+
+```python
+from pathlib import Path
+from waxcut import load_audio_stream, parse_cue_sheet, split_at, write_id3v2_tag
+
+stream = load_audio_stream(Path("album.mp3"))
+cue_text = Path("album.cue").read_text()
+timestamps = parse_cue_sheet(cue_text)
+tracks = split_at(stream, timestamps)
+
+titles = ["Intro", "Second Track", "Third Track"]
+for i, (segment, title) in enumerate(zip(tracks, titles, strict=True), start=1):
+    if len(segment) == 0:
+        continue  # sub-frame-resolution or over-long cue entry -- nothing to write
+    tagged = write_id3v2_tag(segment, title=title, track=i)
+    Path(f"track{i:02d}.mp3").write_bytes(tagged)
+```
+
+## Streaming large files
+
+`split_at` returns a `list[bytes]` with every segment fully materialized at
+once, so even with `use_mmap=True` (which avoids loading the whole source
+file into memory), a full split pipeline still peaks at roughly the size of
+all segments held simultaneously. For a very large file, loop
+`frame_index_at`/`slice_bytes` directly and write each segment as it's
+produced instead of collecting them all via `split_at` first -- only one
+segment is ever in memory at a time:
+
+```python
+from pathlib import Path
+from waxcut import load_audio_stream, frame_index_at, slice_bytes
+
+with load_audio_stream(Path("huge_mixtape.mp3"), use_mmap=True) as stream:
+    cut_points = [90_000, 180_000, 270_000]  # ms
+    indices = [0, *(frame_index_at(stream.frames, t) for t in cut_points), len(stream.frames)]
+    for i, (start, end) in enumerate(zip(indices, indices[1:])):
+        segment = slice_bytes(stream.data, stream.frames, start, end)
+        Path(f"part{i}.mp3").write_bytes(segment)
+        # segment goes out of scope here -- only one segment in memory at a time
+```
+
 See [How It Works](./how-it-works.md) for why this approach is safe, and the
 [API Reference](./api-reference.md) for the full public surface.
