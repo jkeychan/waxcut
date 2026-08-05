@@ -289,6 +289,92 @@ frame's `start_ms` plus its `duration_ms`.
   `UnsupportedMp3Error` instead — so this only happens if you pass in an
   empty sequence you constructed or filtered yourself.
 
+## `parse_cue_sheet`
+
+```python
+def parse_cue_sheet(text: str) -> list[float]
+```
+
+Parses CUE-sheet text into cut-point timestamps, in milliseconds.
+
+Extracts each AUDIO TRACK's INDEX 01 timestamp from a single-FILE CUE sheet
+(the standard shape for a ripped album: one audio file, several TRACK/INDEX
+01 entries marking where each track starts). The first track's INDEX 01 is
+almost always `00:00:00` and is dropped from the output — it isn't a real
+cut point, the stream already starts there; feeding a leading `0.0` into
+`split_at` would otherwise produce a spurious empty first segment. Any other
+collected timestamp, including a genuinely nonzero first one, is kept.
+
+Recognized but ignored: `REM` comments, `TITLE`/`PERFORMER`/`SONGWRITER`
+(disc- and track-level), `CATALOG`, `CDTEXTFILE`, `ISRC`, `FLAGS`,
+`PREGAP`/`POSTGAP`, `INDEX 00` and `INDEX 02`+, and any `TRACK` whose type
+isn't `AUDIO` (its `INDEX` lines are skipped, not treated as errors).
+
+`MM:SS:FF` is CD Red Book timecode — minutes, seconds, and CD "frames" (0-74
+at 75 frames/second) — unrelated to and not to be confused with an MPEG
+audio [`Frame`](#frame) elsewhere on this page; it's a fixed 1/75-second CD
+unit, not a frame of audio data.
+
+**Args**
+- `text` (`str`) — the full contents of a `.cue` file, already decoded to
+  `str`.
+
+**Returns**
+- `list[float]` — cut-point timestamps in milliseconds, in the order tracks
+  appear, ready to pass directly as [`split_at`](#split_at)'s
+  `timestamps_ms` argument. Empty if the cue sheet describes only a single
+  track.
+
+**Raises**
+- `CueSheetError` — `text` contains no AUDIO TRACK with an INDEX 01 entry;
+  contains more than one FILE line (multi-FILE cue sheets, where each
+  TRACK's audio lives in a different file, aren't supported — their
+  timestamps aren't comparable without knowing per-file boundaries); an
+  INDEX 01 timestamp isn't valid MM:SS:FF (wrong field count, non-numeric
+  fields, seconds outside 0-59, or the CD frame field outside 0-74 at 75
+  frames/second); an AUDIO track's block ends without ever recording its own
+  INDEX 01; or a later INDEX 01 timestamp is strictly less than the one
+  before it (equal, i.e. duplicate, timestamps are allowed — `split_at`
+  already documents that a duplicate timestamp simply yields an empty
+  segment).
+
+**Example**
+
+Given this single-`FILE`, 3-track cue sheet:
+
+```
+REM GENRE Reggae
+REM DATE 1978
+PERFORMER "The Wailers"
+TITLE "Kaya"
+FILE "kaya.mp3" MP3
+  TRACK 01 AUDIO
+    TITLE "Easy Skanking"
+    PERFORMER "The Wailers"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Kaya"
+    PERFORMER "The Wailers"
+    INDEX 00 03:22:18
+    INDEX 01 03:25:37
+  TRACK 03 AUDIO
+    TITLE "Sun Is Shining"
+    PERFORMER "The Wailers"
+    INDEX 01 07:00:00
+```
+
+`parse_cue_sheet(text)` returns:
+
+```python
+[205493.33333333334, 420000.0]
+```
+
+Track 1's `INDEX 01 00:00:00` is dropped (the stream already starts there),
+track 2's `INDEX 00` (pregap) is ignored, and track 2's and track 3's
+`INDEX 01` entries become the two cut points — feeding this list directly
+into `split_at(stream, timestamps)` produces exactly 3 segments, one per
+track.
+
 ## `scan_frames`
 
 ```python
@@ -357,6 +443,21 @@ current implementation this covers two cases:
 - [`load_audio_stream`](#load_audio_stream) finds a file consisting of
   only a VBR header frame (Xing/Info/VBRI) with no real audio frames after
   it.
+
+It subclasses `ValueError`.
+
+## `CueSheetError`
+
+```python
+class CueSheetError(ValueError)
+```
+
+Raised when cue-sheet text can't be parsed into cut-point timestamps.
+Covers malformed MM:SS:FF timestamps, a TRACK with no INDEX 01, cue text
+with no audio tracks at all, out-of-order INDEX 01 timestamps, and
+multi-FILE cue sheets (unsupported — see
+[`parse_cue_sheet`](#parse_cue_sheet)). Always raised with a message naming
+the offending line.
 
 It subclasses `ValueError`.
 
