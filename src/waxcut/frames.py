@@ -283,8 +283,9 @@ def write_id3v2_tag(
     whichever of the three fields are given -- with no padding and no
     footer. Intended for `data` that has no leading ID3v2 tag of its own,
     which is always true of slice_bytes/split_at output (see their
-    docstrings): this function does not detect, strip, or merge with a
-    pre-existing tag, it only ever prepends a new one.
+    docstrings): this function detects a pre-existing leading ID3v2 tag
+    and refuses to tag over it (see Raises below) rather than stacking a
+    second tag on top of it.
 
     Args:
         data: Bytes to tag, typically the output of slice_bytes or one
@@ -302,14 +303,25 @@ def write_id3v2_tag(
         `data`, unmodified.
 
     Raises:
-        ValueError: `track` is given and is less than 1, or the combined
-            size of the requested frames does not fit in a 4-byte ID3v2
-            syncsafe integer (the ~256 MB tag-size ceiling the format
-            itself imposes -- effectively unreachable for title/artist/
-            track text, but guarded rather than silently overflowing).
+        ValueError: `track` is given and is less than 1, `data` already
+            starts with an ID3v2 tag (stacking a second tag on top would
+            corrupt frame scanning, since scan_frames/id3v2_size only ever
+            skip the outermost tag), or the combined size of the requested
+            frames does not fit in a 4-byte ID3v2 syncsafe integer (the
+            ~256 MB tag-size ceiling the format itself imposes --
+            effectively unreachable for title/artist/track text, but
+            guarded rather than silently overflowing).
     """
+    data = bytes(data)
     if track is not None and track < 1:
         raise ValueError(f"write_id3v2_tag() requires track >= 1, got {track}")
+    existing_tag_size = id3v2_size(data)
+    if existing_tag_size:
+        raise ValueError(
+            f"write_id3v2_tag() refuses to tag data that already has a leading ID3v2 tag "
+            f"({existing_tag_size} bytes) -- this would corrupt frame scanning. Pass untagged "
+            f"split output only."
+        )
 
     frame_bytes = b""
     if title is not None:
@@ -320,7 +332,7 @@ def write_id3v2_tag(
         frame_bytes += _text_frame(b"TRCK", str(track))
 
     header = b"ID3" + _ID3V2_TAG_VERSION + b"\x00" + _syncsafe(len(frame_bytes))
-    return header + frame_bytes + bytes(data)
+    return header + frame_bytes + data
 
 
 def _parse_header(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVersion, int, int, int] | None:
