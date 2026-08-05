@@ -229,6 +229,45 @@ bytes exactly, with no re-parsing or re-alignment needed.
 **Returns**
 - `bytes` — the concatenated result.
 
+## `write_id3v2_tag`
+
+```python
+def write_id3v2_tag(
+    data: bytes,
+    *,
+    title: str | None = None,
+    artist: str | None = None,
+    track: int | None = None,
+) -> bytes
+```
+
+Prepends a fresh, minimal ID3v2.3 tag onto `data`, writing `TIT2` (title),
+`TPE1` (artist), and `TRCK` (track number) frames for whichever fields are
+given. No padding, no footer, no attempt to detect or merge with a
+pre-existing tag already in `data` — this is meant to be called on
+[`slice_bytes`](#slice_bytes)/[`split_at`](#split_at) output, which never
+has a leading ID3v2 tag of its own.
+
+Text is encoded per-frame: Latin-1 (ID3v2 encoding byte `0x00`) where the
+text allows it, UTF-16 with an explicit little-endian BOM (encoding byte
+`0x01`) otherwise — UTF-8 is a v2.4-only encoding and would be invalid in
+this v2.3 tag.
+
+**Args**
+- `data` (`bytes`) — bytes to tag; coerced via `bytes(data)` so a
+  `memoryview` or similar is also accepted.
+- `title` (`str | None`) — track title, written as a `TIT2` frame if given.
+- `artist` (`str | None`) — track artist, written as a `TPE1` frame if given.
+- `track` (`int | None`) — track number, written as a `TRCK` frame
+  (`str(track)`, no `"N/total"` support yet) if given.
+
+**Returns**
+- `bytes` — the ID3v2.3 tag followed immediately by `data`.
+
+**Raises**
+- `ValueError` — `track` is given and is less than `1`, or the combined
+  frame payload doesn't fit in a 4-byte ID3v2 syncsafe integer.
+
 ## `total_duration_ms`
 
 ```python

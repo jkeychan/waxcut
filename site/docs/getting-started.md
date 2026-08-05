@@ -51,5 +51,23 @@ for i, part in enumerate(parts):
     Path(f"part{i}.mp3").write_bytes(part)
 ```
 
+## Tagging split output
+
+`write_id3v2_tag` writes a minimal ID3v2.3 tag (title/artist/track number)
+onto any `bytes` — typically one segment of `split_at`'s output:
+
+```python
+from pathlib import Path
+from waxcut import load_audio_stream, split_at, write_id3v2_tag
+
+stream = load_audio_stream(Path("album.mp3"))
+segments = split_at(stream, timestamps_ms=[90_000, 180_000, 270_000])
+
+titles = ["Intro", "Second Track", "Third Track", "Outro"]
+for i, (segment, title) in enumerate(zip(segments, titles, strict=True), start=1):
+    tagged = write_id3v2_tag(segment, title=title, artist="Various Artists", track=i)
+    Path(f"track{i}.mp3").write_bytes(tagged)
+```
+
 See [How It Works](./how-it-works.md) for why this approach is safe, and the
 [API Reference](./api-reference.md) for the full public surface.
