@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import bisect
 import math
+import mmap
 import struct
 from array import array
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from io import BufferedReader
 from itertools import pairwise
 from pathlib import Path
 from typing import Literal
@@ -84,6 +86,11 @@ class UnsupportedMp3Error(ValueError):
 # (even multi-hour, high-bitrate recordings) while keeping a single call's
 # cost bounded. See SECURITY.md for the full threat-model note.
 _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
+
+# See Task 3 in the full plan for full rationale; this constant is
+# introduced here since load_audio_stream references it, even though its
+# own dedicated tests land in a later task.
+_MAX_MMAP_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 
 
 class FileTooLargeError(UnsupportedMp3Error):
@@ -575,8 +582,13 @@ def slice_bytes(data: bytes, frames: Sequence[Frame], start_idx: int, end_idx: i
 class AudioStream:
     """Parsed MP3 stream with located frames and gapless metadata.
 
+    Supports use as a context manager (`with load_audio_stream(...) as
+    stream:`) to release an mmap-backed `data` and its file handle on exit;
+    see close().
+
     Attributes:
-        data: The complete file bytes this AudioStream was parsed from.
+        data: The complete file bytes this AudioStream was parsed from, or
+            an open mmap.mmap over the file if loaded with use_mmap=True.
         frames: Located MPEG Layer III frames, in file order, excluding any
             VBR header frame. start_ms of the first frame is 0.
         encoder_delay_samples: Gapless playback trim from a LAME encoder tag,
@@ -592,11 +604,12 @@ class AudioStream:
         sample_rate: Audio sample rate in Hz (e.g. 44100, 48000).
     """
 
-    data: bytes
+    data: bytes | mmap.mmap
     frames: Frames
     encoder_delay_samples: int
     encoder_padding_samples: int
     sample_rate: int
+    _file: BufferedReader | None = field(default=None, repr=False, compare=False)
 
     @property
     def duration_ms(self) -> float:
@@ -608,8 +621,26 @@ class AudioStream:
         trim_ms = (self.encoder_delay_samples + self.encoder_padding_samples) / self.sample_rate * 1000
         return max(0.0, self.duration_ms - trim_ms)
 
+    def close(self) -> None:
+        """Release the mmap and file handle backing `data`, if any.
 
-def load_audio_stream(path: Path) -> AudioStream:
+        A no-op when this AudioStream was loaded without `use_mmap=True`
+        (`data` is a plain, already-materialized `bytes` object with no
+        open file handle to release). Safe to call more than once.
+        """
+        if isinstance(self.data, mmap.mmap) and not self.data.closed:
+            self.data.close()
+        if self._file is not None and not self._file.closed:
+            self._file.close()
+
+    def __enter__(self) -> AudioStream:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
     """Load an MP3 file and parse all its frames for frame-accurate splitting.
 
     Opens and reads the file, scans it for MPEG Layer III frames (skipping
@@ -621,49 +652,80 @@ def load_audio_stream(path: Path) -> AudioStream:
 
     Args:
         path: Path to an MP3 file on disk.
+        use_mmap: If True, memory-map the file instead of reading it fully
+            into memory. Raises the mmap-specific size limit instead of the
+            default one; call AudioStream.close() (or use it as a context
+            manager) to release the mapping and file handle when done.
 
     Returns:
-        An AudioStream containing the file's bytes, parsed frames, extracted
-        gapless metadata, and sample rate. The returned AudioStream.frames
-        is ready for use with frame_index_at and slice_bytes for frame-
-        accurate splitting.
+        An AudioStream containing the file's bytes (or an mmap.mmap view of
+        them, if use_mmap=True), parsed frames, extracted gapless metadata,
+        and sample rate. The returned AudioStream.frames is ready for use
+        with frame_index_at and slice_bytes for frame-accurate splitting.
 
     Raises:
         UnsupportedMp3Error: No valid MPEG Layer III frame was found in the
             file, or the file consists only of a VBR header frame with no
             real audio data after it.
-        FileTooLargeError: The file exceeds 250 MB. Checked against the
-            file's size on disk before reading it, so an oversized file
-            never gets fully loaded into memory in the first place. See
-            SECURITY.md.
+        FileTooLargeError: The file exceeds the applicable size limit.
+            Checked against the file's size on disk before reading it, so
+            an oversized file never gets fully loaded into memory in the
+            first place. See SECURITY.md.
         FileNotFoundError: The file at `path` does not exist.
     """
     file_size = path.stat().st_size
-    if file_size > _MAX_FILE_SIZE_BYTES:
+    max_size = _MAX_MMAP_FILE_SIZE_BYTES if use_mmap else _MAX_FILE_SIZE_BYTES
+    if file_size > max_size:
+        limit_mb = max_size // (1024 * 1024)
         raise FileTooLargeError(
-            f"{path} is {file_size} bytes, exceeding the {_MAX_FILE_SIZE_BYTES}-byte (250 MB) limit."
+            f"{path} is {file_size} bytes, exceeding the {max_size}-byte ({limit_mb} MB) limit."
         )
-    data = path.read_bytes()
-    raw_frames = scan_frames(data)
 
-    first = raw_frames[0]
-    version, _, sample_rate, _ = _parse_header(data, first.offset)
-    tag_offset = _vbr_header_tag_offset(data, first, version)
+    data: bytes | mmap.mmap
+    file_handle = None
+    if use_mmap:
+        if file_size == 0:
+            # mmap.mmap() raises ValueError on a zero-byte file; match the
+            # bytes path's behavior (empty data -> UnsupportedMp3Error from
+            # scan_frames) instead of leaking that platform-specific error.
+            raise UnsupportedMp3Error("No valid MPEG audio frames found.")
+        # Not opened via `with`: this handle is kept open for AudioStream's
+        # lifetime and released via AudioStream.close().
+        file_handle = path.open("rb")
+        try:
+            data = mmap.mmap(file_handle.fileno(), 0, access=mmap.ACCESS_READ)
+        except Exception:
+            file_handle.close()
+            raise
+    else:
+        data = path.read_bytes()
 
-    if tag_offset is None:
-        return AudioStream(data, raw_frames, 0, 0, sample_rate)
+    try:
+        raw_frames = scan_frames(data)
+        first = raw_frames[0]
+        version, _, sample_rate, _ = _parse_header(data, first.offset)
+        tag_offset = _vbr_header_tag_offset(data, first, version)
 
-    gapless = _parse_lame_gapless(data, first, tag_offset)
-    delay, padding = gapless if gapless else (0, 0)
+        if tag_offset is None:
+            return AudioStream(data, raw_frames, 0, 0, sample_rate, _file=file_handle)
 
-    # The Xing/Info/VBRI frame is encoder metadata, not audio: drop it and
-    # rebase remaining frames so start_ms=0 is the first real audio frame.
-    # .rebase() is O(1) -- a view over the same backing arrays with an
-    # adjusted start_ms bias, not a rebuild of every remaining Frame.
-    rebased = raw_frames[1:].rebase(first.duration_ms)
-    if not rebased:
-        raise UnsupportedMp3Error("File contains only a VBR header frame, no audio.")
-    return AudioStream(data, rebased, delay, padding, sample_rate)
+        gapless = _parse_lame_gapless(data, first, tag_offset)
+        delay, padding = gapless if gapless else (0, 0)
+
+        # The Xing/Info/VBRI frame is encoder metadata, not audio: drop it
+        # and rebase remaining frames so start_ms=0 is the first real audio
+        # frame. .rebase() is O(1) -- a view over the same backing arrays
+        # with an adjusted start_ms bias, not a rebuild of every remaining
+        # Frame.
+        rebased = raw_frames[1:].rebase(first.duration_ms)
+        if not rebased:
+            raise UnsupportedMp3Error("File contains only a VBR header frame, no audio.")
+        return AudioStream(data, rebased, delay, padding, sample_rate, _file=file_handle)
+    except Exception:
+        if use_mmap:
+            data.close()  # type: ignore[union-attr]
+            file_handle.close()
+        raise
 
 
 def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:

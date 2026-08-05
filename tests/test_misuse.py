@@ -38,6 +38,20 @@ def test_slice_bytes_rejects_negative_indices():
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURE_NAMES = [
+    "cbr_stereo.mp3",
+    "cbr_mono.mp3",
+    "vbr_stereo.mp3",
+    "lame_vbr_stereo.mp3",
+    "mono_8khz.mp3",
+    "joint_stereo_vbr.mp3",
+    "with_id3v1_trailer.mp3",
+]
+
+
+@pytest.fixture(params=FIXTURE_NAMES)
+def fixture_path(request) -> Path:
+    return FIXTURES / request.param
 
 
 def test_load_audio_stream_missing_file_raises_file_not_found():
@@ -134,3 +148,28 @@ def test_write_id3v2_tag_syncsafe_guard_rejects_oversized_frame_payload():
     huge_title = "x" * (1 << 28)
     with pytest.raises(ValueError, match=r"syncsafe|fit"):
         waxcut.write_id3v2_tag(b"data", title=huge_title)
+
+
+def test_audio_stream_close_is_a_noop_without_mmap(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    stream.close()  # must not raise
+    # data is still fully valid bytes after close() on the non-mmap path
+    assert len(stream.data) > 0
+
+
+def test_audio_stream_context_manager_closes_mmap_on_exit(fixture_path):
+    with waxcut.load_audio_stream(fixture_path, use_mmap=True) as stream:
+        assert not stream.data.closed
+    assert stream.data.closed
+
+
+def test_audio_stream_mmap_close_is_idempotent(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path, use_mmap=True)
+    stream.close()
+    stream.close()  # must not raise on a second close
+
+
+def test_audio_stream_context_manager_closes_on_exception(fixture_path):
+    with pytest.raises(RuntimeError), waxcut.load_audio_stream(fixture_path, use_mmap=True) as stream:
+        raise RuntimeError("boom")
+    assert stream.data.closed
