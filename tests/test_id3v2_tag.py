@@ -78,6 +78,37 @@ _VBR_XFAIL_REASON = (
 )
 
 
+_ALL_FIXTURES = ["cbr_stereo.mp3", "cbr_mono.mp3", "vbr_stereo.mp3", "lame_vbr_stereo.mp3"]
+
+
+def _load_tagged(fixture_name, tmp_path):
+    """load -> slice_bytes (untagged, per its own contract) -> write_id3v2_tag -> written to disk.
+
+    Shared by the tag-content and duration tests below so both exercise the
+    same end-to-end path without duplicating it.
+    """
+    stream = waxcut.load_audio_stream(FIXTURES / fixture_name)
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+    assert whole[:3] != b"ID3"  # confirms slice_bytes output really has no tag of its own
+
+    tagged = waxcut.write_id3v2_tag(whole, title="Track One", artist="Test Artist", track=1)
+    out_path = tmp_path / "tagged.mp3"
+    out_path.write_bytes(tagged)
+    return stream, MP3(out_path)
+
+
+@pytest.mark.parametrize("fixture_name", _ALL_FIXTURES)
+def test_tagged_split_output_has_correct_tag_content(fixture_name, tmp_path):
+    # Confirms the ID3v2 tag doesn't perturb frame scanning for a
+    # real-world reader, and that the tag itself is attached and legible
+    # via MP3.tags -- unconditionally, for all four fixtures including the
+    # two VBR ones, so a tag-content regression can't be masked by the
+    # duration xfail below (see test_tagged_split_output_has_correct_duration).
+    _, parsed = _load_tagged(fixture_name, tmp_path)
+    assert parsed.tags["TIT2"].text == ["Track One"]
+    assert parsed.tags["TRCK"].text == ["1"]
+
+
 @pytest.mark.parametrize(
     "fixture_name",
     [
@@ -87,21 +118,9 @@ _VBR_XFAIL_REASON = (
         pytest.param("lame_vbr_stereo.mp3", marks=pytest.mark.xfail(reason=_VBR_XFAIL_REASON, strict=True)),
     ],
 )
-def test_tagged_split_output_is_a_valid_mp3_with_correct_duration(fixture_name, tmp_path):
-    # End-to-end: load -> slice_bytes (untagged, per its own contract) ->
-    # write_id3v2_tag -> written to disk -> opened by mutagen.mp3.MP3 as a
-    # complete file, confirming the ID3v2 tag doesn't perturb frame
-    # scanning/duration for a real-world reader, and that the tag itself
-    # is attached and legible via MP3.tags.
-    stream = waxcut.load_audio_stream(FIXTURES / fixture_name)
-    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
-    assert whole[:3] != b"ID3"  # confirms slice_bytes output really has no tag of its own
-
-    tagged = waxcut.write_id3v2_tag(whole, title="Track One", artist="Test Artist", track=1)
-    out_path = tmp_path / "tagged.mp3"
-    out_path.write_bytes(tagged)
-
-    parsed = MP3(out_path)
-    assert parsed.tags["TIT2"].text == ["Track One"]
-    assert parsed.tags["TRCK"].text == ["1"]
+def test_tagged_split_output_has_correct_duration(fixture_name, tmp_path):
+    # Isolated from tag-content assertions on purpose: this is the only
+    # property that's unreliable for true VBR fixtures (see
+    # _VBR_XFAIL_REASON), so it's the only assertion scoped by xfail.
+    stream, parsed = _load_tagged(fixture_name, tmp_path)
     assert parsed.info.length * 1000 == pytest.approx(stream.playable_duration_ms, abs=1.0)

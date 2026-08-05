@@ -69,5 +69,12 @@ for i, (segment, title) in enumerate(zip(segments, titles, strict=True), start=1
     Path(f"track{i}.mp3").write_bytes(tagged)
 ```
 
+For source files with true variable bitrate (VBR) encoding, some tag readers
+and players estimate duration from the first MPEG frame's bitrate rather than
+decoding the whole file. Since split output doesn't carry forward the
+original Xing/VBRI VBR header, those readers may report an inaccurate
+duration for split VBR tracks. This is a property of how splitting works
+(frame-accurate byte copying), not a bug in `write_id3v2_tag`.
+
 See [How It Works](./how-it-works.md) for why this approach is safe, and the
 [API Reference](./api-reference.md) for the full public surface.

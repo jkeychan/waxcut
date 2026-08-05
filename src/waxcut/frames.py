@@ -213,7 +213,6 @@ def id3v2_size(data: bytes) -> int:
 
 
 _ID3V2_TAG_VERSION = b"\x03\x00"  # ID3v2.3.0 -- see plan doc for why not 2.4
-_ID3V2_FRAME_HEADER_SIZE = 10
 _LATIN1_ENCODING_BYTE = b"\x00"
 _UTF16_ENCODING_BYTE = b"\x01"
 _UTF16_LE_BOM = b"\xff\xfe"
