@@ -34,10 +34,11 @@ entry point that parses untrusted raw bytes directly — plus the downstream
 functions the harness calls on its result (`total_duration_ms`,
 `frame_index_at`, `slice_bytes`), with malformed and adversarial byte
 sequences: truncated headers, corrupted sync words, bogus bitrate/sample-rate
-indices — looking for crashes, hangs, or memory issues rather than
-correctness per se. This matters specifically because `scan_frames` reads
-raw, untrusted bytes directly (offsets and lengths all come from
-attacker-controlled header bits). `load_audio_stream` — and the
+indices, malformed ID3v2 tags — looking for crashes, hangs, or memory issues
+rather than correctness per se. This matters specifically because
+`scan_frames` reads raw, untrusted bytes directly (offsets and lengths all
+come from attacker-controlled header bits), including the leading ID3v2 tag
+it skips via `id3v2_size`. `load_audio_stream` — and the
 Xing/Info/VBRI/LAME-parsing code paths that only run inside it, not in
 `scan_frames` alone — is not exercised by this harness, nor are
 `write_id3v2_tag` or `parse_cue_sheet`.

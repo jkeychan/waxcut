@@ -247,8 +247,11 @@ def join_frames(segments: list[bytes]) -> bytes
 
 Concatenates frame-aligned MP3 byte segments back into one stream. Safe
 because MPEG Layer III frames are self-delimited — each carries its own
-length in its header — so concatenation always reproduces the original
-bytes exactly, with no re-parsing or re-alignment needed.
+length in its header — so concatenation always reproduces the joined audio
+frame span exactly, with no re-parsing or re-alignment needed. Not the
+original file bytes, though: leading ID3v2 tags, the VBR header frame, and
+any trailer aren't carried into split output, so they're absent from a
+rejoin too.
 
 **Args**
 - `segments` (`list[bytes]`) — byte segments to join, in order, as

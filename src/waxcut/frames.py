@@ -821,8 +821,11 @@ def join_frames(segments: list[bytes]) -> bytes:
 
     MPEG Layer III frames are self-delimited — each one carries its own
     length in its header — so concatenating segments produced by
-    slice_bytes/split_at is always safe and reproduces the original bytes
-    exactly, with no need to re-parse or re-align anything.
+    slice_bytes/split_at is always safe and reproduces the joined audio
+    frame span exactly, with no need to re-parse or re-align anything. Not
+    the original file bytes, though: leading ID3v2 tags, the VBR header
+    frame, and any trailer aren't carried into split output, so they're
+    absent from a rejoin too.
 
     Args:
         segments: Byte segments to join, in order, as produced by
