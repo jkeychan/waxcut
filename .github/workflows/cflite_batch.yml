@@ -9,9 +9,20 @@ permissions: {}
 
 jobs:
   fuzz:
-    name: Batch fuzzing (6 hours)
+    name: Batch fuzzing (4 hours)
     runs-on: ubuntu-latest
+    # GitHub-hosted runners hard-cap a job at 360 minutes and cancel it
+    # without a useful message. Cap ourselves below that so an overrun
+    # surfaces as an explicit timeout, and leave ~60 minutes of headroom
+    # over `fuzz-seconds` for checkout, the OSS-Fuzz image pull, the
+    # fuzzer build, and corpus download/upload.
+    timeout-minutes: 300
     permissions:
+      # `actions: read` lets ClusterFuzzLite list and download the corpus
+      # artifact from previous runs via the Actions API; the matching
+      # upload goes through the runner's artifact service, which is not
+      # governed by this block.
+      actions: read
       contents: read
     steps:
       - name: Checkout code
@@ -23,10 +34,12 @@ jobs:
         id: build
         uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           language: python
 
       - name: Run fuzzers
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
-          fuzz-seconds: 21600
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 14400
           mode: "batch"
