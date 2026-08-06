@@ -384,7 +384,12 @@ def _vbr_header_tag_offset(data: bytes | mmap.mmap, frame: Frame, version: MpegV
     side_info = _SIDE_INFO_SIZE[(version, _is_mono(header))]
     crc = _CRC_SIZE if _has_crc(header) else 0
     tag_start = 4 + crc + side_info
-    if frame.offset + tag_start + 4 > len(data):
+    # A Xing/Info/VBRI tag lives inside its own frame, so bound the probe by
+    # the frame's end as well as the buffer's: bytes past frame.offset +
+    # frame.length belong to whatever follows (another frame, a trailer, or
+    # nothing at all near EOF) and must not be read as this frame's tag.
+    tag_limit = min(len(data), frame.offset + frame.length)
+    if frame.offset + tag_start + 4 > tag_limit:
         return None
     tag = data[frame.offset + tag_start : frame.offset + tag_start + 4]
     return tag_start if tag in _VBR_HEADER_TAGS else None
@@ -397,6 +402,12 @@ _TWELVE_BIT_FIELD_LIMIT = 4096
 def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
     """Extract (encoder_delay_samples, encoder_padding_samples) from a LAME extension tag, if present."""
     pos = frame.offset + tag_offset
+    # The tag's own 4 bytes plus the 4-byte flags word that follows them.
+    # _vbr_header_tag_offset only guarantees the tag itself is present, so
+    # this must be checked here or the unpack below raises a raw
+    # struct.error out of the public API on a truncated/crafted file.
+    if pos + 8 > len(data):
+        return None
     flags = struct.unpack_from(">I", data, pos + 4)[0]
     pos += 8
     for flag_bit, size in ((0b0001, 4), (0b0010, 4), (0b0100, 100), (0b1000, 4)):

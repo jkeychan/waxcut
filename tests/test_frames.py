@@ -234,6 +234,55 @@ def test_lame_gapless_tag_found_when_frame_is_crc_protected(tmp_path):
     assert stream.encoder_padding_samples == padding
 
 
+def _mpeg2_stereo_8kbps_header(*, sample_rate_idx: int) -> bytes:
+    """A valid MPEG2 Layer III, 8kbps, stereo, CRC-free frame header.
+
+    The smallest frames the format allows -- short enough that a Xing tag
+    sits near the very end of the frame, which is what makes the truncated
+    reads below reachable at all.
+    """
+    sync = 0x7FF << 21
+    version = 0b10 << 19  # MPEG2
+    layer = 0b01 << 17  # Layer III
+    protection = 1 << 16  # no CRC
+    bitrate_idx = 1 << 12  # 8kbps
+    channel_mode = 0b00 << 6  # stereo
+    header = sync | version | layer | protection | bitrate_idx | (sample_rate_idx << 10) | channel_mode
+    return struct.pack(">I", header)
+
+
+def test_truncated_xing_flags_word_raises_unsupported_not_struct_error(tmp_path):
+    # 8kbps @ 22050Hz gives a 26-byte frame; the Xing tag starts at byte 21
+    # (4 header + 17 side info), so the tag itself fits but the 4-byte flags
+    # word that follows it runs past EOF. Reading it unguarded leaked a raw
+    # struct.error out of load_audio_stream.
+    frame = _mpeg2_stereo_8kbps_header(sample_rate_idx=0b00) + b"\x00" * 17 + b"Xing"
+    frame += b"\x00" * (26 - len(frame))
+    assert len(frame) == 26
+
+    truncated = tmp_path / "truncated_xing.mp3"
+    truncated.write_bytes(frame)
+
+    with pytest.raises(waxcut.UnsupportedMp3Error):
+        waxcut.load_audio_stream(truncated)
+
+
+def test_vbr_tag_straddling_the_frame_end_is_not_treated_as_a_vbr_header(tmp_path):
+    # 8kbps @ 24000Hz gives a 24-byte frame, so the 4-byte probe at offset 21
+    # runs one byte past the frame's own end. Bounding that probe against the
+    # whole buffer instead of the frame let trailing bytes complete a "Xing"
+    # that isn't in this frame at all -- and the real audio frame was then
+    # discarded as encoder metadata.
+    frame = _mpeg2_stereo_8kbps_header(sample_rate_idx=0b01) + b"\x00" * 17 + b"Xin"
+    assert len(frame) == 24
+    straddling = tmp_path / "straddling_tag.mp3"
+    straddling.write_bytes(frame + b"g" + b"\x00" * 40)  # trailing junk completes "Xing"
+
+    stream = waxcut.load_audio_stream(straddling)
+    assert len(stream.frames) == 1
+    assert stream.frames[0].offset == 0
+
+
 def test_load_audio_stream_use_mmap_produces_identical_frames(fixture_path):
     normal = waxcut.load_audio_stream(fixture_path)
     with waxcut.load_audio_stream(fixture_path, use_mmap=True) as mmapped:
