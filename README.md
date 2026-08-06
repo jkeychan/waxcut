@@ -6,8 +6,8 @@
 [![Docs](https://img.shields.io/badge/docs-waxcut.pages.dev-blue)](https://waxcut.pages.dev/)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jkeychan/waxcut/badge)](https://scorecard.dev/viewer/?uri=github.com/jkeychan/waxcut)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13947/badge)](https://www.bestpractices.dev/projects/13947)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/pypi/pyversions/waxcut.svg)](pyproject.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/jkeychan/waxcut/blob/main/LICENSE)
+[![Python](https://img.shields.io/pypi/pyversions/waxcut.svg)](https://github.com/jkeychan/waxcut/blob/main/pyproject.toml)
 
 Frame-accurate, lossless MP3 splitting and duration parsing in pure Python with
 no ffmpeg, no subprocess, no decode step.
@@ -25,11 +25,11 @@ uv add waxcut
 
 ## Usage
 
-Quick duration check from the shell, no script needed — replace `song.mp3`
-at the end with the path to your own file and run it as-is:
+Quick duration check from the shell, no script needed — replace `'song.mp3'`
+below (keep the quotes) with the path to your own file and run it as-is:
 
 ```bash
-python -c "from pathlib import Path; from waxcut import load_audio_stream as l; import sys; print(f'{l(Path(sys.argv[1])).playable_duration_ms / 1000:.1f}s')" song.mp3
+python -c "from pathlib import Path; from waxcut import load_audio_stream as l; print(round(l(Path('song.mp3')).playable_duration_ms / 1000, 1), 's')"
 ```
 
 For actually splitting a file, here's the full pattern — load it once, then
@@ -102,14 +102,14 @@ Validated against mutagen's independent parser (duration must match
 exactly, including LAME gapless delay/padding) across CBR/VBR, mono/stereo,
 and multiple encoder tags. Where `ffmpeg`/`ffprobe` are available, every
 split output is independently decoded to confirm it's valid. Fuzzed
-continuously with [ClusterFuzzLite](.clusterfuzzlite/).
+continuously with [ClusterFuzzLite](https://github.com/jkeychan/waxcut/tree/main/.clusterfuzzlite/).
 
 ## Contributing
 
-Bug reports and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
+Bug reports and pull requests are welcome — see [CONTRIBUTING.md](https://github.com/jkeychan/waxcut/blob/main/CONTRIBUTING.md)
 for the dev setup and PR process. Report security vulnerabilities per
-[SECURITY.md](SECURITY.md) rather than as public issues.
+[SECURITY.md](https://github.com/jkeychan/waxcut/blob/main/SECURITY.md) rather than as public issues.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](https://github.com/jkeychan/waxcut/blob/main/LICENSE).

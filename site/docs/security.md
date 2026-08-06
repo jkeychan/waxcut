@@ -98,6 +98,24 @@ legitimately needs to process larger files, please
 [open an issue](https://github.com/jkeychan/waxcut/issues/new) rather than
 relying on undocumented internals to work around it.
 
+`parse_cue_sheet` (untrusted `.cue` file text) is a different case, and
+deliberately has no size cap. `scan_frames`/`load_audio_stream` read from a
+`Path`, so they need to reject an oversized file before ever reading it off
+disk into memory. `parse_cue_sheet` takes an already-materialized `str` --
+by the time it's called, the caller has already paid the cost of holding
+that text in memory, so a cap inside `parse_cue_sheet` wouldn't bound
+anything the caller doesn't already control. This is a deliberate
+consequence of the two functions sitting at different I/O boundaries, not
+an oversight.
+
+For completeness, the amplification from cue text to parsed timestamps is
+higher than the ~0.95x figure above for frame parsing — measured at
+roughly **3.9x**: a 5.93 MB cue sheet producing 99,999 timestamps peaks
+around 22.9 MB. Robustness has been checked the same way as the frame
+parser, if not yet via the same continuous ClusterFuzzLite harness: 40,000
+adversarial and mutated cue inputs run through `parse_cue_sheet` produced
+zero exceptions other than the documented `CueSheetError`.
+
 ## Supply-chain and process posture
 
 waxcut's security posture is checked and scored by two independent,

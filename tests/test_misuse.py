@@ -132,6 +132,16 @@ def test_write_id3v2_tag_rejects_track_below_one():
         waxcut.write_id3v2_tag(b"data", track=-5)
 
 
+def test_write_id3v2_tag_rejects_data_with_a_pre_existing_id3v2_tag():
+    # The most realistic double-call scenario: re-tagging output that was
+    # already tagged (e.g. re-running a pipeline). Stacking a second tag
+    # would corrupt frame scanning -- see id3v2_size, which only ever
+    # accounts for the outermost tag.
+    already_tagged = waxcut.write_id3v2_tag(b"REST", title="X")
+    with pytest.raises(ValueError, match="leading ID3v2 tag"):
+        waxcut.write_id3v2_tag(already_tagged, title="Y")
+
+
 def test_write_id3v2_tag_accepts_memoryview_input():
     # slice_bytes always returns real bytes today, but write_id3v2_tag
     # coerces via bytes(data) defensively -- see the plan doc's
