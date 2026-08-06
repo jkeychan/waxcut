@@ -146,11 +146,31 @@ def test_split_at_no_timestamps_returns_whole_stream_as_one_segment(fixture_path
     assert segment == waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
 
 
-def test_split_at_out_of_order_timestamps_produces_empty_segment(fixture_path):
+def test_split_at_duplicate_timestamps_produce_an_empty_segment(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    midpoint = stream.playable_duration_ms / 2
+    segments = waxcut.split_at(stream, [midpoint, midpoint])
+    assert len(segments) == 3
+    assert segments[1] == b""
+
+
+def test_split_at_sorts_out_of_order_timestamps_instead_of_duplicating_audio(fixture_path):
+    # Unsorted cut points used to build overlapping index ranges, so the
+    # segments covered some frames twice and join_frames produced a stream
+    # longer than the original instead of reproducing it.
     stream = waxcut.load_audio_stream(fixture_path)
     duration = stream.playable_duration_ms
-    segments = waxcut.split_at(stream, [duration * 0.75, duration * 0.25])
-    assert segments[1] == b""
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+
+    reversed_order = waxcut.split_at(stream, [duration * 0.75, duration * 0.25])
+    ascending = waxcut.split_at(stream, [duration * 0.25, duration * 0.75])
+
+    assert waxcut.join_frames(reversed_order) == whole
+    assert sum(len(segment) for segment in reversed_order) == len(whole)
+    # Input order only decides where the cuts land, never how many segments
+    # come back, and the result is always in ascending stream order.
+    assert len(reversed_order) == 3
+    assert reversed_order == ascending
 
 
 def test_join_frames_reverses_split_at(fixture_path):

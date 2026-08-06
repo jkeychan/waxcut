@@ -800,19 +800,32 @@ def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
         stream: An AudioStream from load_audio_stream.
         timestamps_ms: Desired cut points, in milliseconds. Need not be
             sorted or in range — each is passed through frame_index_at,
-            which clamps out-of-range values, so an out-of-order or
-            duplicate timestamp simply produces an empty segment at that
-            position rather than raising.
+            which clamps out-of-range values, and the resulting frame
+            indices are then sorted, so unsorted input is normalized to
+            ascending cut points rather than producing overlapping (and
+            therefore audio-duplicating) segments. A duplicate timestamp,
+            or two timestamps landing on the same frame, still yields an
+            empty segment between them.
 
     Returns:
-        A list of len(timestamps_ms) + 1 byte segments, in order. Each
+        A list of len(timestamps_ms) + 1 byte segments, in ascending time
+        order. The count only ever depends on how many timestamps were
+        passed — sorting reorders where the cuts land, never how many
+        segments come back — but the segments are ordered by position in
+        the stream, not by the order the timestamps were given in. Each
         segment is a standalone, decodable MP3 stream, byte-identical to
         the corresponding span of stream.data. Concatenating all segments
-        (see join_frames) reproduces the original audio exactly. Each
-        segment is fresh, independent bytes — safe to use even after
-        closing an mmap-backed stream (see AudioStream.close()).
+        (see join_frames) reproduces the original audio exactly, for any
+        input order. Each segment is fresh, independent bytes — safe to
+        use even after closing an mmap-backed stream (see
+        AudioStream.close()).
     """
-    idxs = [0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)]
+    # Sorted so the pairwise ranges below are non-overlapping: unsorted
+    # indices would pair into ranges that revisit the same frames, and
+    # join_frames on those segments would duplicate audio rather than
+    # reproduce the original. frame_index_at still runs against each
+    # timestamp as given -- only the resulting indices are sorted.
+    idxs = sorted([0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)])
     return [slice_bytes(stream.data, stream.frames, start, end) for start, end in pairwise(idxs)]
 
 
