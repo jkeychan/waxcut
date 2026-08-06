@@ -6,6 +6,8 @@ dist/
 *.egg-info/
 docs/superpowers/
 .claude/
+.superpowers/
+CLAUDE.md
 site/node_modules/
 site/build/
 site/.docusaurus/
