@@ -70,6 +70,50 @@ def test_frames_reversed_slice_is_empty_like_a_list(fixture_path):
     assert len(frames[1:][4:1]) == 0
 
 
+def test_frames_every_reversed_slice_form_matches_the_equivalent_list_slice(fixture_path):
+    # The clamp has to hold for every spelling of a backwards range, not just
+    # a literal frames[5:2]: negative bounds and an explicit step of 1 reach
+    # it through slice.indices() rather than directly.
+    frames = waxcut.load_audio_stream(fixture_path).frames
+    as_list = list(frames)
+    count = len(frames)
+    assert count > 5
+
+    for start, stop in ((5, 2), (-1, -5), (count, 0), (-1, 0), (10**9, 0)):
+        view = frames[start:stop]
+        expected = as_list[start:stop]
+        assert expected == []
+        assert len(view) == 0
+        assert list(view) == []
+        assert not view
+        with pytest.raises(IndexError):
+            view[0]
+
+    # an explicit step of 1 is still a supported slice, unlike step != 1
+    assert len(frames[5:2:1]) == 0
+    # and slicing or rebasing an already-empty view stays empty
+    assert len(frames[5:2][0:5]) == 0
+    assert len(frames[5:2].rebase(10.0)) == 0
+
+
+def test_frames_forward_slicing_still_matches_list_semantics(fixture_path):
+    # _view is shared by every slice, so the reversed-range clamp must not
+    # disturb ordinary forward slicing, including negative and out-of-range
+    # bounds.
+    frames = waxcut.load_audio_stream(fixture_path).frames
+    as_list = list(frames)
+    count = len(frames)
+
+    bounds = [None, 0, 1, count // 2, count - 1, count, count + 50, -1, -count, -count - 50]
+    for start in bounds:
+        for stop in bounds:
+            view = frames[start:stop]
+            expected = as_list[start:stop]
+            assert len(view) == len(expected)
+            assert list(view) == expected
+            assert bool(view) == bool(expected)
+
+
 def test_load_audio_stream_missing_file_raises_file_not_found():
     with pytest.raises(FileNotFoundError):
         waxcut.load_audio_stream(FIXTURES / "does_not_exist.mp3")

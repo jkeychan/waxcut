@@ -173,6 +173,40 @@ def test_split_at_sorts_out_of_order_timestamps_instead_of_duplicating_audio(fix
     assert reversed_order == ascending
 
 
+def test_split_at_normalizes_every_ordering_of_several_timestamps(fixture_path):
+    # Two cut points can only be ordered or reversed, so a fix that merely
+    # reverses a backwards pair satisfies the two-timestamp case above while
+    # still building overlapping ranges for input that is unsorted in the
+    # middle. Every permutation of three cut points must give byte-identical
+    # segments, and each must still rejoin into exactly the original.
+    stream = waxcut.load_audio_stream(fixture_path)
+    duration = stream.playable_duration_ms
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+    cuts = [duration * 0.25, duration * 0.5, duration * 0.75]
+
+    ascending = waxcut.split_at(stream, cuts)
+    for ordering in itertools.permutations(cuts):
+        segments = waxcut.split_at(stream, list(ordering))
+        assert len(segments) == len(cuts) + 1
+        assert waxcut.join_frames(segments) == whole
+        assert sum(len(segment) for segment in segments) == len(whole)
+        assert segments == ascending
+
+
+def test_split_at_repeated_timestamps_keep_one_segment_per_cut(fixture_path):
+    # Sorting must not collapse equal indices: N identical cut points still
+    # return N + 1 segments, all but the first and last empty.
+    stream = waxcut.load_audio_stream(fixture_path)
+    midpoint = stream.playable_duration_ms / 2
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+
+    segments = waxcut.split_at(stream, [midpoint] * 4)
+
+    assert len(segments) == 5
+    assert segments[1:4] == [b"", b"", b""]
+    assert waxcut.join_frames(segments) == whole
+
+
 def test_join_frames_reverses_split_at(fixture_path):
     stream = waxcut.load_audio_stream(fixture_path)
     whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
