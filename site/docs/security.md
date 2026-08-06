@@ -29,13 +29,18 @@ The frame parser is fuzzed continuously with
 [ClusterFuzzLite](https://github.com/jkeychan/waxcut/blob/main/.clusterfuzzlite/),
 via the
 [`cflite_pr.yml`](https://github.com/jkeychan/waxcut/actions/workflows/cflite_pr.yml)
-workflow. Every pull request is fuzzed against the parsing entry points with
-malformed and adversarial byte sequences — truncated headers, corrupted
-sync words, bogus bitrate/sample-rate indices, malformed ID3v2/Xing/Info/VBRI
-tags — looking for crashes, hangs, or memory issues rather than correctness
-per se. This matters specifically because `load_audio_stream` and
-`scan_frames` read raw, untrusted bytes directly (offsets, lengths, and tag
-fields all come from attacker-controlled header bits).
+workflow. Every pull request is fuzzed against `scan_frames` — the only
+entry point that parses untrusted raw bytes directly — plus the downstream
+functions the harness calls on its result (`total_duration_ms`,
+`frame_index_at`, `slice_bytes`), with malformed and adversarial byte
+sequences: truncated headers, corrupted sync words, bogus bitrate/sample-rate
+indices — looking for crashes, hangs, or memory issues rather than
+correctness per se. This matters specifically because `scan_frames` reads
+raw, untrusted bytes directly (offsets and lengths all come from
+attacker-controlled header bits). `load_audio_stream` — and the
+Xing/Info/VBRI/LAME-parsing code paths that only run inside it, not in
+`scan_frames` alone — is not exercised by this harness, nor are
+`write_id3v2_tag` or `parse_cue_sheet`.
 
 ## Resource limits
 
