@@ -164,6 +164,16 @@ def test_parse_cue_sheet_rejects_data_track_with_trailing_audio_token():
     assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
 
 
+def test_parse_cue_sheet_ignores_track_line_missing_type_field():
+    # A TRACK line with no type token at all (fewer than the 3 fields
+    # TRACK <number> <type> requires) must be treated like any other
+    # non-AUDIO track -- skipped, not a crash. Nothing about the type
+    # position guarantees a type is present; _TRACK_LINE_MIN_FIELDS is the
+    # only thing standing between this and an IndexError on parts[2].
+    text = 'FILE "x.bin" BINARY\n  TRACK 01\n    INDEX 01 00:00:02\n  TRACK 02 AUDIO\n    INDEX 01 00:05:00\n'
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
+
+
 def test_parse_cue_sheet_rejects_no_tracks_found():
     with pytest.raises(waxcut.CueSheetError, match="no audio TRACK/INDEX 01"):
         waxcut.parse_cue_sheet("this is not a cue sheet at all\njust some text\n")
