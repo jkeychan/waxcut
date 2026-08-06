@@ -40,6 +40,16 @@ measured, vs. ~0.95x above), and 40,000 adversarial/mutated cue inputs run
 through it during testing raised only `CueSheetError` -- never an
 unhandled exception.
 
+`write_id3v2_tag` writes attacker-influenceable text (a caller-supplied
+title/artist, which may itself originate from untrusted `.cue` metadata)
+into binary tag frames. Two guards keep that bounded and unambiguous: the
+combined frame payload is capped at the ID3v2 tag-size field's own limit
+(a 4-byte syncsafe integer, ~256 MB), raising `ValueError` if exceeded; and
+`write_id3v2_tag` raises `ValueError` rather than writing a second tag if
+`data` already has a leading ID3v2 tag, since a stacked tag would shift
+where frame scanning starts and corrupt output — a parser-confusion bug
+class, not just a correctness one.
+
 ## Reporting a Vulnerability
 
 Please report security vulnerabilities privately using GitHub's

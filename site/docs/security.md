@@ -116,6 +116,31 @@ parser, if not yet via the same continuous ClusterFuzzLite harness: 40,000
 adversarial and mutated cue inputs run through `parse_cue_sheet` produced
 zero exceptions other than the documented `CueSheetError`.
 
+## `write_id3v2_tag`'s input guards
+
+`write_id3v2_tag` is the one function in the public surface that writes
+text supplied by the caller — a title, artist, or track number — into
+binary tag frames, rather than only reading and validating bytes handed to
+it. That text isn't necessarily hand-typed: a realistic pipeline pulls it
+straight from `parse_cue_sheet`'s `TITLE`/`PERFORMER` fields, which are
+themselves attacker-influenceable if the `.cue` file came from an untrusted
+source. Two guards keep that path bounded and unambiguous:
+
+- **Size**: the combined `TIT2`/`TPE1`/`TRCK` frame payload is capped by
+  the ID3v2 tag format's own size field — a 4-byte syncsafe integer, whose
+  maximum representable value is `2**28 - 1` (~256 MB). A pathologically
+  large title (e.g. a caller accidentally passing an entire file's
+  contents as `title`) raises `ValueError` rather than silently truncating
+  or overflowing.
+- **No stacked tags**: if `data` already starts with an ID3v2 tag,
+  `write_id3v2_tag` raises `ValueError` instead of prepending a second one.
+  This isn't just a correctness fix — a stacked tag shifts where frame
+  scanning actually starts, so `scan_frames` (which only skips *one*
+  leading tag) would misinterpret real audio bytes as tag-adjacent data.
+  That's a parser-confusion bug class, the same family fuzzing (above)
+  exists to catch, even though this particular case is a deterministic
+  input-validation guard rather than something fuzzing found.
+
 ## Supply-chain and process posture
 
 waxcut's security posture is checked and scored by two independent,
