@@ -80,7 +80,7 @@ def _handle_track_line(line: str) -> tuple[str, bool]:
     """Parse a TRACK line; return (track_number, is_audio_track)."""
     parts = line.split()
     track_number = parts[1] if len(parts) > 1 else "?"
-    is_audio = parts[-1].upper() == _AUDIO_TRACK_TYPE if len(parts) >= _TRACK_LINE_MIN_FIELDS else False
+    is_audio = parts[2].upper() == _AUDIO_TRACK_TYPE if len(parts) >= _TRACK_LINE_MIN_FIELDS else False
     return track_number, is_audio
 
 

@@ -121,10 +121,43 @@ def test_parse_cue_sheet_ignores_pregap_postgap_and_index_00():
 
 
 def test_parse_cue_sheet_ignores_non_audio_tracks():
+    # Track 1's INDEX 01 is deliberately nonzero (00:00:02) rather than
+    # 00:00:00: if the AUDIO/non-AUDIO type check ever broke and let this
+    # MODE1/2352 track through, its timestamp would survive the leading-
+    # zero-drop rule and show up in the result -- a zero timestamp would
+    # get silently dropped by that rule either way, masking the failure.
     text = (
         'FILE "x.bin" BINARY\n'
         "  TRACK 01 MODE1/2352\n"
+        "    INDEX 01 00:00:02\n"
+        "  TRACK 02 AUDIO\n"
+        "    INDEX 01 00:05:00\n"
+    )
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
+
+
+def test_parse_cue_sheet_keeps_track_with_trailing_comment_token():
+    # TRACK type lives at a fixed grammar position (TRACK <number> <type>),
+    # not at the end of the line -- a trailing comment or stray token after
+    # AUDIO must not cause the track to be misread as non-audio and dropped.
+    text = (
+        'FILE "x.mp3" MP3\n'
+        "  TRACK 01 AUDIO\n"
         "    INDEX 01 00:00:00\n"
+        "  TRACK 02 AUDIO  ; ripped with X\n"
+        "    INDEX 01 00:05:00\n"
+    )
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
+
+
+def test_parse_cue_sheet_rejects_data_track_with_trailing_audio_token():
+    # The converse: a data track type with an extra trailing token that
+    # happens to be "AUDIO" must not be misread as an audio track just
+    # because AUDIO is the last whitespace-split token on the line.
+    text = (
+        'FILE "x.bin" BINARY\n'
+        "  TRACK 01 MODE1/2352 AUDIO\n"
+        "    INDEX 01 00:00:02\n"
         "  TRACK 02 AUDIO\n"
         "    INDEX 01 00:05:00\n"
     )
