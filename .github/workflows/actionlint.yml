@@ -1,4 +1,4 @@
-name: Workflow Security and Linting
+name: Actionlint
 
 on:
   push:
