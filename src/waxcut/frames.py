@@ -405,11 +405,18 @@ _TWELVE_BIT_FIELD_LIMIT = 4096
 def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
     """Extract (encoder_delay_samples, encoder_padding_samples) from a LAME extension tag, if present."""
     pos = frame.offset + tag_offset
+    # The LAME extension lives inside the same frame as the Xing/Info tag
+    # that precedes it, so bound reads by the frame's end as well as the
+    # buffer's — same reasoning as _vbr_header_tag_offset. Without this,
+    # bytes past frame.offset + frame.length belong to whatever follows
+    # (another frame, a trailer, or nothing at all near EOF) and would be
+    # misread as this frame's gapless data instead of just failing to parse.
+    tag_limit = min(len(data), frame.offset + frame.length)
     # The tag's own 4 bytes plus the 4-byte flags word that follows them.
     # _vbr_header_tag_offset only guarantees the tag itself is present, so
     # this must be checked here or the unpack below raises a raw
     # struct.error out of the public API on a truncated/crafted file.
-    if pos + 8 > len(data):
+    if pos + 8 > tag_limit:
         return None
     flags = struct.unpack_from(">I", data, pos + 4)[0]
     pos += 8
@@ -418,7 +425,7 @@ def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) 
             pos += size
 
     lame_start = pos
-    if lame_start + 24 > len(data):
+    if lame_start + 24 > tag_limit:
         return None
     version_string = data[lame_start : lame_start + 9]
     # Only genuine LAME encodes reliably populate the extended gapless

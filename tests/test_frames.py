@@ -317,6 +317,46 @@ def test_vbr_tag_straddling_the_frame_end_is_not_treated_as_a_vbr_header(tmp_pat
     assert stream.frames[0].offset == 0
 
 
+def test_lame_gapless_tag_past_frame_end_is_not_read(tmp_path):
+    # Same 26-byte MPEG2/stereo/8kbps/22050Hz/no-CRC geometry as the
+    # straddling-tag test above: the Xing tag (offset 21, 4 bytes) fits
+    # entirely inside the frame, but the LAME extension that follows it
+    # (flags word + "LAME" version string + delay/padding) does not -- it
+    # needs 32 more bytes than the 1 remaining in the frame. Bounding the
+    # read against the whole buffer instead of the frame let bytes from
+    # this junk region (and potentially a second real frame) be read and
+    # decoded as if they were this frame's gapless delay/padding.
+    frame_one = _mpeg2_stereo_8kbps_header(sample_rate_idx=0b00) + b"\x00" * 17 + b"Xing"
+    frame_one += b"\x00" * (26 - len(frame_one))
+    assert len(frame_one) == 26
+
+    flags = b"\x00\x00\x00\x00"  # combines with frame_one's last byte to read as flags=0
+    version_string = b"LAME3.100"
+    unused = b"\x00" * (21 - len(version_string))
+    delay, padding = 321, 654
+    delay_padding = bytes(
+        [
+            (delay >> 4) & 0xFF,
+            ((delay & 0xF) << 4) | ((padding >> 8) & 0xF),
+            padding & 0xFF,
+        ]
+    )
+    # This junk sits entirely past frame_one's end (offset 26+), shaped so a
+    # buggy read bounded only by len(data) would decode it as a genuine LAME
+    # gapless tag -- exactly the bytes _parse_lame_gapless must not reach.
+    junk = flags[1:] + version_string + unused + delay_padding
+
+    frame_two = _mpeg2_stereo_8kbps_header(sample_rate_idx=0b00) + b"\x00" * 22
+    assert len(frame_two) == 26
+
+    crafted = tmp_path / "lame_tag_past_frame_end.mp3"
+    crafted.write_bytes(frame_one + junk + frame_two)
+
+    stream = waxcut.load_audio_stream(crafted)
+    assert stream.encoder_delay_samples == 0
+    assert stream.encoder_padding_samples == 0
+
+
 def test_load_audio_stream_use_mmap_produces_identical_frames(fixture_path):
     normal = waxcut.load_audio_stream(fixture_path)
     with waxcut.load_audio_stream(fixture_path, use_mmap=True) as mmapped:
