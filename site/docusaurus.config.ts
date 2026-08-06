@@ -21,8 +21,8 @@ const config: Config = {
   baseUrl: '/',
 
   // Used to build GitHub edit links; not a GitHub Pages deployment.
-  organizationName: 'jkeychan', // Usually your GitHub org/user name.
-  projectName: 'waxcut', // Usually your repo name.
+  organizationName: 'jkeychan',
+  projectName: 'waxcut',
 
   onBrokenLinks: 'throw',
 
