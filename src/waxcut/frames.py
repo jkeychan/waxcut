@@ -174,7 +174,10 @@ class Frames(Sequence["Frame"]):
         view._start_ms = base._start_ms
         view._duration_ms = base._duration_ms
         view._start = start
-        view._stop = stop
+        # A reversed slice (frames[5:2]) would otherwise give a negative
+        # __len__, which CPython rejects with ValueError -- clamp to an
+        # empty view, matching what list does for the same slice.
+        view._stop = max(start, stop)
         view._start_ms_bias = start_ms_bias
         return view
 

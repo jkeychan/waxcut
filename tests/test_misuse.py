@@ -55,6 +55,21 @@ def fixture_path(request) -> Path:
     return FIXTURES / request.param
 
 
+def test_frames_reversed_slice_is_empty_like_a_list(fixture_path):
+    # frames[5:2] built a view with stop < start, so __len__ returned a
+    # negative number and CPython turned it into a bare ValueError. A real
+    # list just returns [], and Frames documents list-equivalent slicing.
+    frames = waxcut.load_audio_stream(fixture_path).frames
+    assert len(frames) > 5
+
+    reversed_slice = frames[5:2]
+    assert len(reversed_slice) == 0
+    assert list(reversed_slice) == []
+    assert not reversed_slice
+    # and a reversed slice of an already-sliced view behaves the same
+    assert len(frames[1:][4:1]) == 0
+
+
 def test_load_audio_stream_missing_file_raises_file_not_found():
     with pytest.raises(FileNotFoundError):
         waxcut.load_audio_stream(FIXTURES / "does_not_exist.mp3")
