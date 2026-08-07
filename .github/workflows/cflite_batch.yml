@@ -9,9 +9,20 @@ permissions: {}
 
 jobs:
   fuzz:
-    name: Batch fuzzing (6 hours)
+    name: Batch fuzzing (4 hours)
     runs-on: ubuntu-latest
+    # GitHub-hosted runners hard-cap a job at 360 minutes and cancel it
+    # without a useful message. Cap ourselves below that so an overrun
+    # surfaces as an explicit timeout, and leave ~60 minutes of headroom
+    # over `fuzz-seconds` for checkout, the OSS-Fuzz image pull, the
+    # fuzzer build, and corpus download/upload.
+    timeout-minutes: 300
     permissions:
+      # `actions: read` lets ClusterFuzzLite list and download the corpus
+      # artifact from previous runs via the Actions API; the matching
+      # upload goes through the runner's artifact service, which is not
+      # governed by this block.
+      actions: read
       contents: read
     steps:
       - name: Checkout code
@@ -19,14 +30,41 @@ jobs:
         with:
           persist-credentials: false
 
+      # google/clusterfuzzlite/actions/{build,run}_fuzzers are composite
+      # actions whose own action.yml hardcodes a floating `docker://...:v1`
+      # image reference with no input to override it — SHA-pinning the
+      # wrapper (as above) does not pin that image. Called directly by
+      # digest instead, replicating the wrapper's exact input-to-env
+      # mapping (including its declared defaults for inputs we don't set)
+      # so behavior is unchanged.
       - name: Build fuzzers
         id: build
-        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
-        with:
-          language: python
+        uses: docker://gcr.io/oss-fuzz-base/clusterfuzzlite-build-fuzzers@sha256:e3430847d309a0a1110f7e17b69a0c02121a40f6d67f711c58c662a940498d42 # v1
+        env:
+          LANGUAGE: python
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: "false"
+          SANITIZER: address
+          BAD_BUILD_CHECK: "true"
+          UPLOAD_BUILD: "false"
+          KEEP_UNAFFECTED_FUZZ_TARGETS: "false"
+          CFL_PLATFORM: github
+          LOW_DISK_SPACE: "True"
 
       - name: Run fuzzers
-        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
-        with:
-          fuzz-seconds: 21600
-          mode: "batch"
+        uses: docker://gcr.io/oss-fuzz-base/clusterfuzzlite-run-fuzzers@sha256:9a94c0cfa36aad7419092fb21c4eaecf276a62eacf3faa20ddb7526e5ff60aed # v1
+        env:
+          FUZZ_SECONDS: "14400"
+          MODE: batch
+          LANGUAGE: c++
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: "false"
+          SANITIZER: address
+          GIT_STORE_BRANCH: main
+          GIT_STORE_BRANCH_COVERAGE: gh-pages
+          REPORT_UNREPRODUCIBLE_CRASHES: "false"
+          OUTPUT_SARIF: "false"
+          MINIMIZE_CRASHES: "false"
+          CFL_PLATFORM: github
+          PARALLEL_FUZZING: "false"
+          LOW_DISK_SPACE: "True"
