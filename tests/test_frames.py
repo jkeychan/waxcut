@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import itertools
 import mmap
 import shutil
@@ -149,6 +150,37 @@ def test_ffmpeg_native_encoder_does_not_produce_false_gapless_values():
         stream = waxcut.load_audio_stream(FIXTURES / name)
         assert stream.encoder_delay_samples == 0
         assert stream.encoder_padding_samples == 0
+
+
+def test_playable_duration_ms_trims_gapless_delay_and_padding():
+    # None of the real fixtures have nonzero delay/padding, so replacing
+    # playable_duration_ms's body with `return self.duration_ms` still
+    # passes every other test in this file -- this needs synthetic values.
+    # dataclasses.replace() on a real load_audio_stream() result keeps
+    # everything else (frames, data, sample_rate) genuine and overrides
+    # only the two gapless fields under test.
+    stream = waxcut.load_audio_stream(FIXTURES / "cbr_stereo.mp3")
+    delay, padding = 1000, 1000
+    trimmed = dataclasses.replace(stream, encoder_delay_samples=delay, encoder_padding_samples=padding)
+
+    expected_trim_ms = (delay + padding) / stream.sample_rate * 1000
+    assert expected_trim_ms < stream.duration_ms  # sanity check: not exercising the clamp here
+    assert trimmed.playable_duration_ms == pytest.approx(stream.duration_ms - expected_trim_ms)
+
+
+def test_playable_duration_ms_clamps_to_zero_when_trim_exceeds_duration():
+    # A delay this large is impossible from a real LAME tag (its gapless
+    # fields are 12-bit, max 4095 -- see _TWELVE_BIT_FIELD_LIMIT), but
+    # AudioStream itself enforces no such range on these two fields (only
+    # _parse_lame_gapless does, at read time) -- so trim_ms can exceed
+    # duration_ms here, which is exactly the case max(0.0, ...) guards.
+    stream = waxcut.load_audio_stream(FIXTURES / "cbr_stereo.mp3")
+    huge_delay = 10_000_000
+    trimmed = dataclasses.replace(stream, encoder_delay_samples=huge_delay, encoder_padding_samples=0)
+
+    trim_ms = huge_delay / stream.sample_rate * 1000
+    assert trim_ms > stream.duration_ms  # sanity check: this really does exceed duration_ms unclamped
+    assert trimmed.playable_duration_ms == 0.0
 
 
 REGRESSION_FIXTURES = Path(__file__).parent / "fixtures" / "regression"
