@@ -643,7 +643,7 @@ def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int
     return data[start:end]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class AudioStream:
     """Parsed MP3 stream with located frames and gapless metadata.
 
@@ -651,10 +651,14 @@ class AudioStream:
     as a context manager (`with load_audio_stream(...) as stream:`) or
     explicit stream.close() -- required when loaded with use_mmap=True to
     release the underlying file handle and mmap; a harmless no-op
-    otherwise. Equality/hashing are identity-based (two AudioStreams
-    parsed from the same file are not `==`), regardless of use_mmap --
-    this was already true before use_mmap existed, since AudioStream.frames
-    (a Frames instance) has never supported content-based equality either.
+    otherwise. Equality/hashing are identity-based (`object`'s default --
+    two AudioStreams parsed from the same file are not `==`), regardless
+    of use_mmap: eq=False opts out of the field-wise __eq__/__hash__ a
+    frozen dataclass generates by default, which would otherwise compare
+    (and hash) the full `data` field -- reading the entire file on every
+    equality check or hash() call, and still reporting two independently-
+    parsed streams as equal since `data` is the only field capable of
+    comparing equal by value in the first place.
 
     Attributes:
         data: The complete file bytes this AudioStream was parsed from, or

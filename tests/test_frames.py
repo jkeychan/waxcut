@@ -103,6 +103,27 @@ def test_frame_index_at_clamps_to_range(fixture_path):
     assert waxcut.frame_index_at(stream.frames, 10**9) == len(stream.frames) - 1
 
 
+def test_audio_stream_equality_and_hash_are_identity_based(fixture_path):
+    # AudioStream is frozen but must not have content-based equality: two
+    # AudioStreams sharing the very same underlying data/frames objects
+    # still must not compare equal. Two independent load_audio_stream()
+    # calls already differ (their `frames` field differs by identity, since
+    # Frames has no __eq__ of its own) even under the old field-wise
+    # dataclass eq, so that alone wouldn't catch a regression back to
+    # eq=True -- sharing the same data/frames objects here is what actually
+    # exercises the fix.
+    stream1 = waxcut.load_audio_stream(fixture_path)
+    stream2 = waxcut.AudioStream(
+        stream1.data,
+        stream1.frames,
+        stream1.encoder_delay_samples,
+        stream1.encoder_padding_samples,
+        stream1.sample_rate,
+    )
+    assert stream1 != stream2
+    assert hash(stream1) != hash(stream2)
+
+
 def test_ffmpeg_native_encoder_does_not_produce_false_gapless_values():
     # cbr_stereo.mp3/cbr_mono.mp3 are encoded with ffmpeg's native "Lavc..."
     # tagged encoder, not real LAME — regression test for misreading that
