@@ -1,9 +1,10 @@
 """Parsing for CUE sheet (.cue) text -- pure text, no audio decoding.
 
 Extracts TRACK/INDEX 01 cut-point timestamps for feeding directly into
-waxcut.split_at. See docs/superpowers/plans/2026-08-04-cue-sheet-parsing-plan.md
-for the full design rationale (grammar scope, error-handling rules, worked
-examples) -- kept out of this docstring to avoid duplicating it.
+waxcut.split_at. See parse_cue_sheet's own docstring for the full grammar
+scope and error-handling rules, or the API Reference's parse_cue_sheet
+section (https://waxcut.pages.dev/docs/api-reference#parse_cue_sheet) for a
+worked example.
 """
 
 from __future__ import annotations
