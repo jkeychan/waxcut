@@ -73,6 +73,63 @@ for i, part in enumerate(parts):
 assert join_frames(parts) == slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
 ```
 
+Tagging split output — `write_id3v2_tag` writes a minimal ID3v2.3 tag
+(title/artist/track) onto untagged bytes, typically one segment of
+`split_at`'s output:
+
+```python
+from pathlib import Path
+from waxcut import load_audio_stream, split_at, write_id3v2_tag
+
+stream = load_audio_stream(Path("album.mp3"))
+segments = split_at(stream, timestamps_ms=[90_000, 180_000, 270_000])
+
+for i, segment in enumerate(segments, start=1):
+    tagged = write_id3v2_tag(segment, title=f"Track {i}", track=i)
+    Path(f"track{i}.mp3").write_bytes(tagged)
+```
+
+Splitting an album from a `.cue` sheet — `parse_cue_sheet` turns its
+`TRACK`/`INDEX 01` entries directly into `split_at`'s `timestamps_ms`, so
+you don't have to work out cut points by hand. Malformed cue text raises
+`CueSheetError`:
+
+```python
+from pathlib import Path
+from waxcut import load_audio_stream, parse_cue_sheet, split_at
+
+stream = load_audio_stream(Path("album.mp3"))
+timestamps = parse_cue_sheet(Path("album.cue").read_text())
+tracks = split_at(stream, timestamps)
+
+for i, track in enumerate(tracks, start=1):
+    Path(f"track{i:02d}.mp3").write_bytes(track)
+```
+
+Large files — `load_audio_stream(path, use_mmap=True)` memory-maps the
+file instead of reading it into a `bytes` object (governed by its own,
+larger 2 GB size cap rather than the 250 MB default; both raise
+`FileTooLargeError` if exceeded). Pair it with `split_to_files`, which
+writes each segment straight to disk instead of collecting them all into
+one `list[bytes]` first:
+
+```python
+from pathlib import Path
+from waxcut import load_audio_stream, split_to_files
+
+with load_audio_stream(Path("huge_mixtape.mp3"), use_mmap=True) as stream:
+    cut_points = [90_000, 180_000, 270_000]
+    output_paths = [Path(f"part{i}.mp3") for i in range(len(cut_points) + 1)]
+    split_to_files(stream, cut_points, output_paths)
+```
+
+See the [docs site](https://waxcut.pages.dev/) for the full public
+surface — every function/class in `waxcut.__all__`, including the
+lower-level pieces the examples above build on (`scan_frames`, `id3v2_size`,
+`total_duration_ms`, `AudioStream`, `Frames`) — and
+[How It Works](https://waxcut.pages.dev/docs/how-it-works) for why the
+approach is safe.
+
 ## Why not ffmpeg or a decode/re-encode library?
 
 MP3 frames are self-describing, so their boundaries can be found directly
@@ -96,6 +153,11 @@ to within 1ms (see [Testing](#testing)).
 Parses **MPEG-1/2/2.5 Audio Layer III** — what "MP3" actually means. Layer
 I/II frames raise `UnsupportedMp3Error` rather than being silently
 mishandled, since virtually no real-world "MP3" file uses them.
+
+Every exception waxcut raises on purpose — `UnsupportedMp3Error`,
+`CueSheetError`, `FileTooLargeError` (a subclass of `UnsupportedMp3Error`)
+— is a `WaxcutError`, itself a `ValueError`, so `except WaxcutError` catches
+all of them in one place without needing to know about each individually.
 
 ## Testing
 
