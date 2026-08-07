@@ -486,9 +486,11 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
     should use load_audio_stream instead, which calls this internally.
 
     Args:
-        data: Raw file bytes. Any bytes-like object indexable/sliceable
-            the same way as bytes is accepted; a plain bytes object is
-            the tested and expected case.
+        data: Raw file bytes. bytes, bytearray, or mmap.mmap -- anything
+            supporting .find() the same way bytes does -- is accepted; a
+            memoryview is not (it has no .find()), despite superficially
+            looking bytes-like otherwise. A plain bytes object is the
+            tested and expected case.
         max_size: Maximum allowed size in bytes. Defaults to 250 MB, the
             same cap load_audio_stream applies by default; pass a larger
             value to override it (load_audio_stream does this internally
