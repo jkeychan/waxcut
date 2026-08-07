@@ -13,6 +13,7 @@ http://www.mp3-tech.org/programmer/frame_header.html
 from __future__ import annotations
 
 import bisect
+import enum
 import math
 import mmap
 import struct
@@ -22,47 +23,65 @@ from dataclasses import dataclass, field
 from io import BufferedReader
 from itertools import pairwise
 from pathlib import Path
-from typing import Literal
+from typing import overload
 
-# MPEG audio version. Not a continuous quantity -- 2.5 is a de facto extension
-# to the standard (low sample rates), not "halfway between 2 and 3".
-MpegVersion = Literal[1, 2, 2.5]
+
+class MpegVersion(enum.Enum):
+    """MPEG audio version. Not a continuous quantity -- 2.5 is a de facto
+    extension to the standard (low sample rates), not "halfway between 2
+    and 3". A plain Literal[1, 2, 2.5] isn't legal under PEP 586 (no float
+    in a Literal), and mixing int/float dict keys risks a silent hash
+    collision (hash(2) == hash(2.0)) -- an Enum sidesteps both.
+    """
+
+    MPEG1 = 1
+    MPEG2 = 2
+    MPEG2_5 = 2.5
+
 
 FRAME_SYNC_MASK = 0xFFE00000
 FRAME_SYNC = 0xFFE00000
 
 # index -> MPEG version; 0b01 is reserved and never appears in valid frames
-_VERSIONS: dict[int, MpegVersion] = {0b00: 2.5, 0b10: 2, 0b11: 1}
+_VERSIONS: dict[int, MpegVersion] = {
+    0b00: MpegVersion.MPEG2_5,
+    0b10: MpegVersion.MPEG2,
+    0b11: MpegVersion.MPEG1,
+}
 # index -> layer number; 0b00 is reserved. "MP3" is specifically Layer III —
 # Layer I/II frames are rejected rather than mishandled (see _parse_header).
 _LAYER_III = 0b01
 
 # version -> bitrate index -> kbps, Layer III only; index 0 is "free" (unsupported), 15 is invalid
 _BITRATES_KBPS: dict[MpegVersion, list[int | None]] = {
-    1: [None, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, None],
-    2: [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
+    MpegVersion.MPEG1: [None, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, None],
+    MpegVersion.MPEG2: [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
 }
-_BITRATES_KBPS[2.5] = _BITRATES_KBPS[2]
+_BITRATES_KBPS[MpegVersion.MPEG2_5] = _BITRATES_KBPS[MpegVersion.MPEG2]
 
 # version -> sample rate index -> Hz; index 3 is reserved
 _SAMPLE_RATES: dict[MpegVersion, list[int | None]] = {
-    1: [44100, 48000, 32000, None],
-    2: [22050, 24000, 16000, None],
-    2.5: [11025, 12000, 8000, None],
+    MpegVersion.MPEG1: [44100, 48000, 32000, None],
+    MpegVersion.MPEG2: [22050, 24000, 16000, None],
+    MpegVersion.MPEG2_5: [11025, 12000, 8000, None],
 }
 
 # version -> samples per Layer III frame
-_SAMPLES_PER_FRAME: dict[MpegVersion, int] = {1: 1152, 2: 576, 2.5: 576}
+_SAMPLES_PER_FRAME: dict[MpegVersion, int] = {
+    MpegVersion.MPEG1: 1152,
+    MpegVersion.MPEG2: 576,
+    MpegVersion.MPEG2_5: 576,
+}
 
 # (version, mono) -> side info size in bytes, i.e. where a Xing/Info/VBRI
 # tag (if present) starts relative to the frame's own offset.
 _SIDE_INFO_SIZE: dict[tuple[MpegVersion, bool], int] = {
-    (1, False): 32,
-    (1, True): 17,
-    (2, False): 17,
-    (2, True): 9,
-    (2.5, False): 17,
-    (2.5, True): 9,
+    (MpegVersion.MPEG1, False): 32,
+    (MpegVersion.MPEG1, True): 17,
+    (MpegVersion.MPEG2, False): 17,
+    (MpegVersion.MPEG2, True): 9,
+    (MpegVersion.MPEG2_5, False): 17,
+    (MpegVersion.MPEG2_5, True): 9,
 }
 _VBR_HEADER_TAGS = (b"Xing", b"Info", b"VBRI")
 
@@ -185,7 +204,9 @@ class Frames(Sequence["Frame"]):
 
     __slots__ = ("_duration_ms", "_lengths", "_offsets", "_start", "_start_ms", "_start_ms_bias", "_stop")
 
-    def __init__(self, offsets: array, lengths: array, start_ms: array, duration_ms: array) -> None:
+    def __init__(
+        self, offsets: array[int], lengths: array[int], start_ms: array[float], duration_ms: array[float]
+    ) -> None:
         self._offsets = offsets
         self._lengths = lengths
         self._start_ms = start_ms
@@ -221,6 +242,11 @@ class Frames(Sequence["Frame"]):
             duration_ms=self._duration_ms[real_index],
         )
 
+    @overload
+    def __getitem__(self, index: int) -> Frame: ...
+    @overload
+    def __getitem__(self, index: slice) -> Frames: ...
+
     def __getitem__(self, index: int | slice) -> Frame | Frames:
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
@@ -245,7 +271,7 @@ class Frames(Sequence["Frame"]):
 _ID3V2_HEADER_SIZE = 10
 
 
-def id3v2_size(data: bytes) -> int:
+def id3v2_size(data: bytes | mmap.mmap) -> int:
     """Return the byte length of a leading ID3v2 tag, or 0 if there isn't one.
 
     Args:
@@ -425,7 +451,7 @@ def _parse_header(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVersion, in
 
 
 def _frame_length(version: MpegVersion, bitrate_kbps: int, sample_rate: int, padding: int) -> int:
-    coefficient = 144 if version == 1 else 72
+    coefficient = 144 if version is MpegVersion.MPEG1 else 72
     return int(coefficient * bitrate_kbps * 1000 / sample_rate) + padding
 
 
@@ -555,10 +581,10 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
     if len(data) > max_size:
         raise FileTooLargeError(f"Input is {len(data)} bytes, exceeding the {max_size}-byte limit.")
     offset = id3v2_size(data)
-    offsets: array = array("I")
-    lengths: array = array("I")
-    start_ms_values: array = array("d")
-    duration_ms_values: array = array("d")
+    offsets: array[int] = array("I")
+    lengths: array[int] = array("I")
+    start_ms_values: array[float] = array("d")
+    duration_ms_values: array[float] = array("d")
     cursor_ms = 0.0
 
     while True:
@@ -864,7 +890,17 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
     try:
         raw_frames = scan_frames(data, max_size=max_size)
         first = raw_frames[0]
-        version, _, sample_rate, _ = _parse_header(data, first.offset)
+        parsed = _parse_header(data, first.offset)
+        if parsed is None:
+            # scan_frames only ever records an offset it already validated
+            # as a real frame header, so re-parsing that same offset can't
+            # actually fail -- this narrows the type for mypy and documents
+            # the invariant, rather than a real runtime possibility. A bare
+            # `assert` is avoided here since this project's ruff config
+            # (bandit S101) flags asserts in non-test code -- they're
+            # stripped under `python -O`, unlike an explicit raise.
+            raise AssertionError("scan_frames already validated this offset as a real frame header")
+        version, _, sample_rate, _ = parsed
         tag_offset = _vbr_header_tag_offset(data, first, version)
 
         if tag_offset is None:
