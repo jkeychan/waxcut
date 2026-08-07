@@ -40,8 +40,12 @@ class MpegVersion(enum.Enum):
     MPEG2_5 = 2.5
 
 
-FRAME_SYNC_MASK = 0xFFE00000
-FRAME_SYNC = 0xFFE00000
+# The top 11 bits of a valid frame header are all set (the sync word); a
+# single constant serves as both the mask and the value to compare against.
+# (Previously two identically-valued constants, FRAME_SYNC_MASK and
+# FRAME_SYNC -- neither exported, both public-looking by name, which read
+# as though they meant two different things. Consolidated to one.)
+_FRAME_SYNC_MASK = 0xFFE00000
 
 # index -> MPEG version; 0b01 is reserved and never appears in valid frames
 _VERSIONS: dict[int, MpegVersion] = {
@@ -49,8 +53,9 @@ _VERSIONS: dict[int, MpegVersion] = {
     0b10: MpegVersion.MPEG2,
     0b11: MpegVersion.MPEG1,
 }
-# index -> layer number; 0b00 is reserved. "MP3" is specifically Layer III —
-# Layer I/II frames are rejected rather than mishandled (see _parse_header).
+# Layer III is the only layer this module parses -- "MP3" specifically means
+# Layer III; Layer I/II frames are rejected rather than mishandled (see
+# _parse_header). 0b00 is reserved and never appears in valid frames.
 _LAYER_III = 0b01
 
 # version -> bitrate index -> kbps, Layer III only; index 0 is "free" (unsupported), 15 is invalid
@@ -58,7 +63,11 @@ _BITRATES_KBPS: dict[MpegVersion, list[int | None]] = {
     MpegVersion.MPEG1: [None, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, None],
     MpegVersion.MPEG2: [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
 }
-_BITRATES_KBPS[MpegVersion.MPEG2_5] = _BITRATES_KBPS[MpegVersion.MPEG2]
+# MPEG2.5 shares MPEG2's bitrate table (list(...), not aliasing the same
+# list object -- nothing mutates either today, but aliasing would silently
+# corrupt both versions' tables the moment something did, e.g. adding
+# free-bitrate support that patches index 0).
+_BITRATES_KBPS[MpegVersion.MPEG2_5] = list(_BITRATES_KBPS[MpegVersion.MPEG2])
 
 # version -> sample rate index -> Hz; index 3 is reserved
 _SAMPLE_RATES: dict[MpegVersion, list[int | None]] = {
@@ -84,7 +93,6 @@ _SIDE_INFO_SIZE: dict[tuple[MpegVersion, bool], int] = {
     (MpegVersion.MPEG2_5, False): 17,
     (MpegVersion.MPEG2_5, True): 9,
 }
-_VBR_HEADER_TAGS = (b"Xing", b"Info", b"VBRI")
 
 # The Fraunhofer VBRI header sits at a fixed offset of 32 bytes past the
 # 4-byte frame header, independent of channel mode, side-info size, or CRC --
@@ -158,9 +166,16 @@ _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
 # failures never accumulate meaningfully), where ~90 MB/s keeps a full
 # 2 GiB scan to well under a minute.
 #
-# Must stay under 4 GiB: frame offsets are stored in an array("I") (4-byte
-# unsigned int, max ~4.29 GB) in scan_frames below -- raising this cap past
-# that would silently overflow there.
+# Must stay under 4 GiB: frame offsets are stored in an array("I") in
+# scan_frames below -- raising this cap past array("I")'s ~4.29 GB range
+# would raise OverflowError there, loudly, not silently -- but a caller
+# passing a max_size above the platform's actual array("I") range as a
+# public, uncapped `max_size` argument shouldn't be relying on a raised
+# exception in an internal detail as validation. "I" is C unsigned int,
+# which the array module documents as *at least* 2 bytes, not guaranteed
+# exactly 4 -- true on every platform this runs on today, but if that ever
+# changed, array("I").itemsize is available to size this cap from directly
+# rather than assuming 4.
 _MAX_MMAP_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 
 # Bounds scan_frames' worst-case wall-clock cost independent of either size
@@ -303,6 +318,9 @@ class Frames(Sequence["Frame"]):
     def __iter__(self) -> Iterator[Frame]:
         for i in range(self._start, self._stop):
             yield self._frame_at(i)
+
+    def __repr__(self) -> str:
+        return f"<Frames: {len(self)} frame(s)>"
 
     def rebase(self, offset_ms: float) -> Frames:
         """A view with every start_ms reduced by offset_ms, without copying."""
@@ -506,7 +524,7 @@ def _parse_header(data: _RawBytes, offset: int) -> tuple[MpegVersion, int, int, 
     if offset + 4 > len(data):
         return None
     header = struct.unpack_from(">I", data, offset)[0]
-    if header & FRAME_SYNC_MASK != FRAME_SYNC:
+    if header & _FRAME_SYNC_MASK != _FRAME_SYNC_MASK:
         return None
 
     version = _VERSIONS.get((header >> 19) & 0b11)
@@ -791,7 +809,7 @@ def scan_frames(data: _RawBytes, *, max_size: int | None = None) -> Frames:
 
     while True:
         # Every valid sync requires the byte at `offset` to be exactly 0xFF
-        # (the top byte of FRAME_SYNC_MASK) -- _parse_header would reject
+        # (the top byte of _FRAME_SYNC_MASK) -- _parse_header would reject
         # any other byte immediately anyway, so jump straight past them with
         # a fast C-level scan instead of calling into _parse_header (struct
         # unpack + bit masking) for every single byte of a non-frame gap
@@ -1005,7 +1023,9 @@ class AudioStream:
     encoder_delay_samples: int
     encoder_padding_samples: int
     sample_rate: int
-    _file: BufferedReader | None = field(default=None, repr=False, compare=False)
+    # compare=False would be inert here: the class is eq=False, so no
+    # __eq__/__hash__ is generated at all for any field to participate in.
+    _file: BufferedReader | None = field(default=None, repr=False)
 
     @property
     def duration_ms(self) -> float:

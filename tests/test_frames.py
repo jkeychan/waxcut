@@ -119,6 +119,11 @@ def test_frames_is_importable_from_top_level_waxcut():
     assert waxcut.Frames is Frames
 
 
+def test_frames_repr_is_useful_not_the_default_object_repr(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    assert repr(stream.frames) == f"<Frames: {len(stream.frames)} frame(s)>"
+
+
 def test_unsupported_mp3_error_is_a_waxcut_error():
     assert issubclass(waxcut.UnsupportedMp3Error, waxcut.WaxcutError)
 
