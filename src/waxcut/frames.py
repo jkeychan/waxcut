@@ -66,6 +66,11 @@ _SIDE_INFO_SIZE: dict[tuple[MpegVersion, bool], int] = {
 }
 _VBR_HEADER_TAGS = (b"Xing", b"Info", b"VBRI")
 
+# The Fraunhofer VBRI header sits at a fixed offset of 32 bytes past the
+# 4-byte frame header, independent of channel mode, side-info size, or CRC --
+# unlike Xing/Info, which immediately follow the side info.
+_VBRI_FIXED_OFFSET = 36
+
 
 class UnsupportedMp3Error(ValueError):
     """Raised when frame parsing can't make sense of the input.
@@ -386,16 +391,24 @@ def _vbr_header_tag_offset(data: bytes | mmap.mmap, frame: Frame, version: MpegV
     header = struct.unpack_from(">I", data, frame.offset)[0]
     side_info = _SIDE_INFO_SIZE[(version, _is_mono(header))]
     crc = _CRC_SIZE if _has_crc(header) else 0
-    tag_start = 4 + crc + side_info
+    xing_start = 4 + crc + side_info
     # A Xing/Info/VBRI tag lives inside its own frame, so bound the probe by
     # the frame's end as well as the buffer's: bytes past frame.offset +
     # frame.length belong to whatever follows (another frame, a trailer, or
     # nothing at all near EOF) and must not be read as this frame's tag.
     tag_limit = min(len(data), frame.offset + frame.length)
-    if frame.offset + tag_start + 4 > tag_limit:
-        return None
-    tag = data[frame.offset + tag_start : frame.offset + tag_start + 4]
-    return tag_start if tag in _VBR_HEADER_TAGS else None
+
+    if frame.offset + xing_start + 4 <= tag_limit:
+        tag = data[frame.offset + xing_start : frame.offset + xing_start + 4]
+        if tag in (b"Xing", b"Info"):
+            return xing_start
+
+    if frame.offset + _VBRI_FIXED_OFFSET + 4 <= tag_limit:
+        tag = data[frame.offset + _VBRI_FIXED_OFFSET : frame.offset + _VBRI_FIXED_OFFSET + 4]
+        if tag == b"VBRI":
+            return _VBRI_FIXED_OFFSET
+
+    return None
 
 
 _LAME_DELAY_PADDING_SIZE = 3  # bytes holding two packed 12-bit fields

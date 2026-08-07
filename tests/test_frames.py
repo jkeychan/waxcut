@@ -357,6 +357,41 @@ def test_lame_gapless_tag_past_frame_end_is_not_read(tmp_path):
     assert stream.encoder_padding_samples == 0
 
 
+def test_vbri_tag_found_at_fixed_offset_for_non_mpeg1_stereo_frame(tmp_path):
+    # The VBRI header sits at a fixed 36-byte offset from the frame start
+    # (unlike Xing/Info, which follow the side info and so move around with
+    # channel mode/CRC). Use an MPEG1 mono, CRC-protected frame: the
+    # Xing/Info side-info formula (4 + crc + side_info = 4 + 2 + 17 = 23)
+    # lands well short of byte 36, so a VBRI tag placed at the real,
+    # fixed offset is only found if it's probed there specifically.
+    sync = 0x7FF << 21
+    version = 0b11 << 19  # MPEG1
+    layer = 0b01 << 17  # Layer III
+    protection = 0 << 16  # CRC present
+    bitrate_idx = 9 << 12  # 128kbps
+    sample_rate_idx = 0b00 << 10  # 44100Hz
+    channel_mode = 0b11 << 6  # mono
+    header = struct.pack(
+        ">I", sync | version | layer | protection | bitrate_idx | sample_rate_idx | channel_mode
+    )
+    frame_length = 417  # 144 * 128000 / 44100, truncated, no padding
+
+    crc = b"\x00\x00"
+    padding_to_vbri = b"\x00" * (36 - len(header) - len(crc))
+    frame_one = header + crc + padding_to_vbri + b"VBRI"
+    frame_one += b"\x00" * (frame_length - len(frame_one))
+    assert len(frame_one) == frame_length
+
+    frame_two = _mpeg1_stereo_128kbps_header(protection_bit=1) + b"\x00" * (frame_length - 4)
+
+    synthetic_mp3 = tmp_path / "vbri_mono_crc.mp3"
+    synthetic_mp3.write_bytes(frame_one + frame_two)
+
+    stream = waxcut.load_audio_stream(synthetic_mp3)
+    assert len(stream.frames) == 1
+    assert stream.frames[0].offset == frame_length
+
+
 def test_load_audio_stream_use_mmap_produces_identical_frames(fixture_path):
     normal = waxcut.load_audio_stream(fixture_path)
     with waxcut.load_audio_stream(fixture_path, use_mmap=True) as mmapped:
