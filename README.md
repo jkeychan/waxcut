@@ -89,7 +89,7 @@ waxcut also handles the parts that make naive frame-splitting subtly wrong:
 
 Duration parsing is cross-validated against
 [mutagen](https://github.com/quodlibet/mutagen)'s independent implementation
-to the millisecond (see [Testing](#testing)).
+to within 1ms (see [Testing](#testing)).
 
 ## Scope
 
@@ -104,11 +104,11 @@ uv sync
 uv run pytest tests/ -v
 ```
 
-Validated against mutagen's independent parser (duration must match
-exactly, including LAME gapless delay/padding) across CBR/VBR, mono/stereo,
-and multiple encoder tags. Where `ffmpeg`/`ffprobe` are available, every
-split output is independently decoded to confirm it's valid. Fuzzed
-continuously with [ClusterFuzzLite](https://github.com/jkeychan/waxcut/tree/main/.clusterfuzzlite/).
+Validated against mutagen's independent parser (duration must match to
+within 1ms, including LAME gapless delay/padding) across CBR/VBR,
+mono/stereo, and multiple encoder tags. Where `ffmpeg`/`ffprobe` are
+available, every split output is independently decoded to confirm it's
+valid. Fuzzed continuously with [ClusterFuzzLite](https://github.com/jkeychan/waxcut/tree/main/.clusterfuzzlite/).
 
 ## Contributing
 
