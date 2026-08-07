@@ -610,9 +610,14 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
             on purpose — see module docstring). Also raised if
             _MAX_CONSECUTIVE_RESYNC_FAILURES consecutive candidate sync
             bytes each fail header validation without a real frame in
-            between -- input that looks nothing like an MP3 is rejected
-            quickly instead of scanning all the way to max_size (see
-            _MAX_CONSECUTIVE_RESYNC_FAILURES's own comment).
+            between *and* no frame has been located yet -- input that
+            looks nothing like an MP3 from the start is rejected quickly
+            instead of scanning all the way to max_size (see
+            _MAX_CONSECUTIVE_RESYNC_FAILURES's own comment). If frames
+            were already found before the resync-failure streak began,
+            the bound still trips at the same point, but scan_frames
+            returns those frames instead of raising -- the same outcome
+            as when `data` simply runs out via find() returning -1.
         FileTooLargeError: `data` exceeds max_size. See SECURITY.md.
     """
     if max_size is None:
@@ -626,20 +631,18 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
     duration_ms_values: array[float] = array("d")
     cursor_ms = 0.0
     consecutive_resync_failures = 0
+    resync_cap_hit = False
 
-    def _resync_failed() -> None:
+    def _resync_failed() -> bool:
         # Called on every failed resync attempt (a candidate 0xFF byte
         # that didn't turn into a real frame). Unbounded consecutive
         # failures is exactly the adversarial cost _MAX_CONSECUTIVE_RESYNC_FAILURES
-        # guards against -- see its own comment above.
+        # guards against -- see its own comment above. Returns True once
+        # the cap trips, so the caller can stop scanning (same worst-case
+        # time bound either way) without discarding frames already found.
         nonlocal consecutive_resync_failures
         consecutive_resync_failures += 1
-        if consecutive_resync_failures > _MAX_CONSECUTIVE_RESYNC_FAILURES:
-            raise UnsupportedMp3Error(
-                "No valid MPEG audio frame found in the first "
-                f"{_MAX_CONSECUTIVE_RESYNC_FAILURES} consecutive resync attempts; "
-                "giving up rather than scanning the rest of the input."
-            )
+        return consecutive_resync_failures > _MAX_CONSECUTIVE_RESYNC_FAILURES
 
     while True:
         # Every valid sync requires the byte at `offset` to be exactly 0xFF
@@ -657,14 +660,18 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
             # 0xFF matched but the rest of the header didn't -- a coincidental
             # byte, not a real sync. Advance one byte and keep scanning.
             offset += 1
-            _resync_failed()
+            if _resync_failed():
+                resync_cap_hit = True
+                break
             continue
 
         version, bitrate, sample_rate, padding = parsed
         length = _frame_length(version, bitrate, sample_rate, padding)
         if length <= 0 or offset + length > len(data):
             offset += 1
-            _resync_failed()
+            if _resync_failed():
+                resync_cap_hit = True
+                break
             continue
         consecutive_resync_failures = 0
 
@@ -688,6 +695,12 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
         offset += length
 
     if not offsets:
+        if resync_cap_hit:
+            raise UnsupportedMp3Error(
+                "No valid MPEG audio frame found in the first "
+                f"{_MAX_CONSECUTIVE_RESYNC_FAILURES} consecutive resync attempts; "
+                "giving up rather than scanning the rest of the input."
+            )
         raise UnsupportedMp3Error("No valid MPEG audio frames found.")
     return Frames(offsets, lengths, start_ms_values, duration_ms_values)
 

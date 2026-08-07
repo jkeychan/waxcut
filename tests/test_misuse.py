@@ -3,6 +3,7 @@ fed malformed MP3 data (see test_frames.py for that side of things)."""
 
 import math
 import mmap
+import struct
 import time
 from pathlib import Path
 
@@ -206,6 +207,46 @@ def test_scan_frames_bounds_adversarial_resync_cost():
         waxcut.scan_frames(adversarial, max_size=len(adversarial))
     elapsed = time.perf_counter() - start
     assert elapsed < 5.0  # measured ~0.3s locally; was ~5.5 minutes pre-fix at 2 GiB
+
+
+def _mpeg1_stereo_128kbps_frame() -> bytes:
+    """A minimal valid MPEG1 Layer III, 128kbps, 44100Hz, stereo frame."""
+    sync = 0x7FF << 21
+    version = 0b11 << 19  # MPEG1
+    layer = 0b01 << 17  # Layer III
+    protection = 1 << 16  # protection_bit=1 -> no CRC
+    bitrate_idx = 9 << 12  # 128kbps
+    sample_rate_idx = 0b00 << 10  # 44100Hz
+    channel_mode = 0b00 << 6  # stereo
+    header = sync | version | layer | protection | bitrate_idx | sample_rate_idx | channel_mode
+    header_bytes = struct.pack(">I", header)
+    frame_length = 417  # 144 * 128000 / 44100, truncated, no padding
+    return header_bytes + b"\x00" * (frame_length - len(header_bytes))
+
+
+def test_scan_frames_returns_located_frames_when_resync_cap_trips_after_valid_frames():
+    # #6 regression: hitting _MAX_CONSECUTIVE_RESYNC_FAILURES used to raise
+    # UnsupportedMp3Error unconditionally, discarding every valid frame
+    # already located -- unlike the natural-exhaustion case (find()
+    # returning -1), which returns partial results. A genuinely-corrupt-
+    # but-mostly-valid MP3 (a large trailing junk section) must still get
+    # its already-located valid frames back instead of losing them all.
+    cap = waxcut.frames._MAX_CONSECUTIVE_RESYNC_FAILURES
+    valid_prefix = _mpeg1_stereo_128kbps_frame() * 200
+    adversarial_trailer = b"\xff" * (cap + 1000)
+    frames = waxcut.scan_frames(valid_prefix + adversarial_trailer)
+    assert len(frames) == 200
+
+
+def test_scan_frames_still_raises_for_pure_adversarial_input_from_byte_zero():
+    # Companion to the above: zero frames located before the cap trips is
+    # still the genuine DoS case this bound exists to catch (input that
+    # looks nothing like an MP3 from the start), and must still raise
+    # rather than silently succeed with an empty Frames.
+    cap = waxcut.frames._MAX_CONSECUTIVE_RESYNC_FAILURES
+    adversarial = b"\xff" * (cap + 1000)
+    with pytest.raises(waxcut.UnsupportedMp3Error, match="consecutive resync attempts"):
+        waxcut.scan_frames(adversarial, max_size=len(adversarial))
 
 
 def test_load_audio_stream_rejects_file_over_the_size_limit(tmp_path, monkeypatch):
