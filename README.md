@@ -154,10 +154,14 @@ Parses **MPEG-1/2/2.5 Audio Layer III** — what "MP3" actually means. Layer
 I/II frames raise `UnsupportedMp3Error` rather than being silently
 mishandled, since virtually no real-world "MP3" file uses them.
 
-Every exception waxcut raises on purpose — `UnsupportedMp3Error`,
-`CueSheetError`, `FileTooLargeError` (a subclass of `UnsupportedMp3Error`)
-— is a `WaxcutError`, itself a `ValueError`, so `except WaxcutError` catches
-all of them in one place without needing to know about each individually.
+waxcut's parse/format errors — `UnsupportedMp3Error`, `CueSheetError`,
+`FileTooLargeError` (a subclass of `UnsupportedMp3Error`) — all share a
+common `WaxcutError` base, itself a `ValueError`, so `except WaxcutError`
+catches all of them in one place without needing to know about each
+individually. Caller-misuse errors — invalid arguments to
+`write_id3v2_tag`, `frame_index_at`, `slice_bytes`, `split_to_files`, or a
+stepped `Frames` slice — are deliberately plain `ValueError`/`TypeError`,
+not `WaxcutError`.
 
 ## Testing
 

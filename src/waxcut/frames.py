@@ -92,14 +92,20 @@ _VBRI_FIXED_OFFSET = 36
 
 
 class WaxcutError(ValueError):
-    """Common base for every exception this package raises on purpose.
+    """Common base for waxcut's parse/format errors.
 
-    Lets a caller catch every waxcut-specific error with one `except
-    WaxcutError` rather than needing to know about each individual
-    exception tree (UnsupportedMp3Error's, CueSheetError's, ...)
-    separately. Still a ValueError subclass, so existing `except
-    ValueError` handlers written before this base class existed keep
-    working unchanged.
+    Lets a caller catch every waxcut-specific parse/format error with one
+    `except WaxcutError` rather than needing to know about each individual
+    exception tree (UnsupportedMp3Error's, FileTooLargeError's,
+    CueSheetError's, ...) separately. Still a ValueError subclass, so
+    existing `except ValueError` handlers written before this base class
+    existed keep working unchanged.
+
+    Caller-misuse errors -- invalid arguments to write_id3v2_tag,
+    frame_index_at, slice_bytes, split_to_files, or a stepped Frames
+    slice -- are deliberately plain ValueError/TypeError, not
+    WaxcutError, since they signal a bug in the calling code rather than
+    a malformed input.
     """
 
 

@@ -535,12 +535,18 @@ syncsafe 4-byte size field and added to the fixed 10-byte header size.
 class WaxcutError(ValueError)
 ```
 
-Common base for every exception this package raises on purpose. Catch
-`WaxcutError` to handle any waxcut-specific failure in one place, instead of
+Common base for waxcut's parse/format errors. Catch `WaxcutError` to
+handle any waxcut-specific parse/format failure in one place, instead of
 needing to know about [`UnsupportedMp3Error`](#unsupportedmp3error)'s and
 [`CueSheetError`](#cuesheeterror)'s trees separately. Subclasses `ValueError`,
 so an `except ValueError` handler written before this base class existed
 keeps working unchanged.
+
+Caller-misuse errors -- invalid arguments to
+[`write_id3v2_tag`](#write_id3v2_tag), [`frame_index_at`](#frame_index_at),
+[`slice_bytes`](#slice_bytes), [`split_to_files`](#split_to_files), or a
+stepped [`Frames`](#frames) slice -- are deliberately plain
+`ValueError`/`TypeError`, not `WaxcutError`.
 
 ## `UnsupportedMp3Error`
 
