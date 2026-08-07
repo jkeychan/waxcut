@@ -10,6 +10,7 @@ import pytest
 from mutagen.mp3 import MP3
 
 import waxcut
+from waxcut import Frames
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE_NAMES = [
@@ -98,6 +99,10 @@ def test_id3v2_size_includes_footer_when_flag_set():
     # syncsafe size field and must be added on top of it.
     header = b"ID3\x04\x00\x10\x00\x00\x00\x05"
     assert waxcut.id3v2_size(header + b"12345" + b"rest") == 25
+
+
+def test_frames_is_importable_from_top_level_waxcut():
+    assert waxcut.Frames is Frames
 
 
 def test_unsupported_mp3_error_is_a_waxcut_error():
