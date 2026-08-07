@@ -639,7 +639,7 @@ def total_duration_ms(frames: Sequence[Frame]) -> float:
     """Total playback duration spanned by `frames`, in milliseconds.
 
     Args:
-        frames: A non-empty list of Frame, as returned by scan_frames.
+        frames: A non-empty Sequence[Frame], as returned by scan_frames.
 
     Returns:
         The last frame's start_ms + duration_ms.
@@ -700,7 +700,7 @@ def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int
 
     Args:
         data: The same bytes `frames` was derived from.
-        frames: Frame list from scan_frames or AudioStream.frames.
+        frames: A Sequence[Frame] from scan_frames or AudioStream.frames.
         start_idx: First frame index to include (inclusive).
         end_idx: One past the last frame index to include (exclusive) —
             standard Python slice semantics.
