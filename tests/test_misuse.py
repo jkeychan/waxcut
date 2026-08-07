@@ -3,6 +3,7 @@ fed malformed MP3 data (see test_frames.py for that side of things)."""
 
 import math
 import mmap
+import time
 from pathlib import Path
 
 import pytest
@@ -186,6 +187,25 @@ def test_scan_frames_allows_input_at_exactly_the_size_limit(monkeypatch):
     with pytest.raises(waxcut.UnsupportedMp3Error) as exc_info:
         waxcut.scan_frames(b"\x00" * 10)  # not a valid MP3, but not oversized either
     assert exc_info.type is waxcut.UnsupportedMp3Error
+
+
+def test_scan_frames_bounds_adversarial_resync_cost():
+    # A9 follow-up regression: pre-fix, a buffer that never forms a valid
+    # sync (all 0xFF -- every byte is a candidate that fails header
+    # validation) scanned all the way to max_size at ~6 MB/s, measured --
+    # ~5.5 minutes for the full 2 GiB use_mmap cap. scan_frames must now
+    # abort after _MAX_CONSECUTIVE_RESYNC_FAILURES consecutive failed
+    # resync attempts instead, well under a second, regardless of how
+    # large max_size is. Uses the real (unpatched) cap, sized just past
+    # it -- 2MB, not gigabytes -- so this actually exercises production
+    # behavior rather than a monkeypatched stand-in.
+    cap = waxcut.frames._MAX_CONSECUTIVE_RESYNC_FAILURES
+    adversarial = b"\xff" * (cap + 1000)
+    start = time.perf_counter()
+    with pytest.raises(waxcut.UnsupportedMp3Error, match="consecutive resync attempts"):
+        waxcut.scan_frames(adversarial, max_size=len(adversarial))
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5.0  # measured ~0.3s locally; was ~5.5 minutes pre-fix at 2 GiB
 
 
 def test_load_audio_stream_rejects_file_over_the_size_limit(tmp_path, monkeypatch):
