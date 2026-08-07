@@ -23,6 +23,14 @@ are responsible for calling `AudioStream.close()` (or using it as a context
 manager) when done -- the file handle stays open for the AudioStream's
 whole lifetime.
 
+`use_mmap=True` is exercised in CI on Linux only -- the
+[`ci.yml`](https://github.com/jkeychan/waxcut/actions/workflows/ci.yml)
+workflow runs exclusively on `ubuntu-latest`, so the mmap code path isn't
+independently verified on Windows or macOS. `mmap`'s underlying semantics
+differ enough across platforms (page-alignment behavior, file-locking
+interaction, close-on-exec) that this is worth calling out explicitly
+rather than assuming portability.
+
 A file packed with minimum-size MPEG2/2.5 Layer III frames (~24 bytes each)
 parses without crashing, at a rate proportional to input size — the size
 limits above bound that worst case for each mode. Located frames are stored
