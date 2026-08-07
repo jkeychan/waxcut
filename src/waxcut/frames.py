@@ -107,12 +107,24 @@ _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
 # use_mmap=True doesn't load the whole file into a Python bytes object, so
 # the memory-amplification rationale behind _MAX_FILE_SIZE_BYTES doesn't
 # apply here -- but scan_frames' worst-case adversarial cost is still O(n)
-# in wall-clock time regardless of what backs `data` (measured: ~150 MB/s
-# against a 20.6MB file of minimum-size MPEG2.5 frames, mmap vs. bytes
-# showed no meaningful throughput difference -- see SECURITY.md). This
-# cap bounds a single call's time cost, not its memory cost. 2 GiB
-# comfortably covers the motivating case (a 6-hour DJ set at a generous
-# 320kbps CBR is ~824MB) while keeping worst-case scan time under ~15s.
+# in wall-clock time regardless of what backs `data`. ~150 MB/s (measured
+# against a 20.6MB file of minimum-size MPEG2.5 frames -- see SECURITY.md)
+# is the valid-frame-carpet case, where _parse_header only runs once per
+# frame; it is not the true worst case. The true worst case is a buffer
+# that never forms a valid sync at all (e.g. a carpet of 0xFF bytes),
+# forcing a per-byte _parse_header attempt -- measured at ~6 MB/s (1-8MB
+# all-0xFF buffers), meaning the full 2 GiB cap's worst-case scan time is
+# closer to ~5.5 minutes, not the ~15s an earlier version of this comment
+# claimed (that number was benchmarked against the valid-frame case, not
+# the adversarial one). This cap bounds a single call's time cost, not its
+# memory cost -- 2 GiB comfortably covers the motivating case (a 6-hour DJ
+# set at a generous 320kbps CBR is ~824MB), but a 5.5-minute single-call
+# cost is genuinely DoS-relevant for a caller exposing this to untrusted
+# input (e.g. a web upload handler). Bounding by consecutive-failed-resync
+# count instead of/alongside raw byte size, so pathological non-frame
+# input fails fast rather than scanning the whole cap's worth of bytes, is
+# a reasonable follow-up -- deliberately not implemented in this pass, to
+# keep it as its own carefully-tested change rather than rushed in here.
 #
 # Must stay under 4 GiB: frame offsets are stored in an array("I") (4-byte
 # unsigned int, max ~4.29 GB) in scan_frames below -- raising this cap past
