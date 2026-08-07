@@ -384,7 +384,14 @@ def _encode_text(text: str) -> bytes:
             (e.g. multi-line-looking output from a single-line field).
             Rejecting them is safer than silently stripping, which could
             surprise a caller with different content than what they
-            passed in.
+            passed in. Also raised, with a message naming this specific
+            cause, if `text` contains a lone surrogate or other character
+            that UTF-16 itself can't encode -- the one case the Latin-1/
+            UTF-16 fallback above doesn't cover. This is realistic input,
+            not just a theoretical edge case: os.fsdecode() produces lone
+            surrogates for a filename that isn't valid UTF-8, and naming
+            a split track after its source filename is an obvious use of
+            this function.
     """
     for char in _FORBIDDEN_TEXT_CHARS:
         if char in text:
@@ -392,7 +399,20 @@ def _encode_text(text: str) -> bytes:
     try:
         return _LATIN1_ENCODING_BYTE + text.encode("latin-1")
     except UnicodeEncodeError:
+        pass
+    try:
         return _UTF16_ENCODING_BYTE + _UTF16_LE_BOM + text.encode("utf-16-le")
+    except UnicodeEncodeError as exc:
+        # Found by a fresh adversarial code review: this encode was
+        # previously unguarded, so a lone surrogate (os.fsdecode()'s
+        # output for a non-UTF-8 filename, most commonly) leaked a raw,
+        # undocumented UnicodeEncodeError instead of the clear message
+        # every other rejection in this function gives.
+        raise ValueError(
+            f"write_id3v2_tag() text fields must be encodable as UTF-16 -- "
+            f"got {text!r}, which contains a lone surrogate or other "
+            "character neither Latin-1 nor UTF-16 can represent"
+        ) from exc
 
 
 def _text_frame(frame_id: bytes, text: str) -> bytes:

@@ -365,6 +365,19 @@ def test_write_id3v2_tag_rejects_nul_cr_lf_in_text_fields(forbidden_char):
         waxcut.write_id3v2_tag(b"data", artist=f"a{forbidden_char}b")
 
 
+def test_write_id3v2_tag_rejects_lone_surrogates_with_a_clear_message():
+    # I5 regression: os.fsdecode() produces lone surrogates for a filename
+    # that isn't valid UTF-8 -- naming a split track after its source
+    # filename is an obvious use of this function. A lone surrogate fails
+    # both the Latin-1 and the (previously unguarded) UTF-16 encode; before
+    # this fix, the UTF-16 UnicodeEncodeError leaked out raw and undocumented
+    # instead of the clear message this function gives for every other
+    # rejection. Found by a fresh adversarial code review.
+    lone_surrogate_title = "track \udcff\udcfe.mp3"
+    with pytest.raises(ValueError, match="encodable as UTF-16"):
+        waxcut.write_id3v2_tag(b"data", title=lone_surrogate_title)
+
+
 def test_audio_stream_close_is_a_noop_without_mmap(fixture_path):
     stream = waxcut.load_audio_stream(fixture_path)
     stream.close()  # must not raise
