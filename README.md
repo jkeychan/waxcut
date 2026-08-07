@@ -58,6 +58,7 @@ Splitting into more than two parts — `split_at`/`join_frames` collapse the
 loop above into one call:
 
 ```python
+from pathlib import Path
 from waxcut import load_audio_stream, split_at, join_frames, slice_bytes
 
 stream = load_audio_stream(Path("mixtape.mp3"))
