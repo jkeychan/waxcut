@@ -79,7 +79,7 @@ def _build_frame(version: MpegVersion, bidx: int, sidx: int, length: int, channe
 def frames_storage_amplification() -> None:
     length, bidx, sidx = _min_frame(MpegVersion.MPEG2)
     frame = _build_frame(MpegVersion.MPEG2, bidx, sidx, length)
-    target_bytes = 10 * 1024 * 1024
+    target_bytes = int(10e6)  # decimal MB, matching the MB display below
     frame_count = target_bytes // length
     data = frame * frame_count
 
@@ -112,7 +112,7 @@ def frames_storage_amplification() -> None:
 def valid_frame_carpet_throughput() -> None:
     length, bidx, sidx = _min_frame(MpegVersion.MPEG2_5)
     frame = _build_frame(MpegVersion.MPEG2_5, bidx, sidx, length, channel_mode=0b11)
-    target_bytes = int(20.6 * 1024 * 1024)
+    target_bytes = int(20.6e6)  # decimal MB, matching the MB/s display below
     data = frame * (target_bytes // length)
 
     scan_frames(data, max_size=len(data) + 1)  # warm up

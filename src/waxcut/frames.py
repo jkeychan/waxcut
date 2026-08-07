@@ -126,22 +126,24 @@ _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
 # use_mmap=True doesn't load the whole file into a Python bytes object, so
 # the memory-amplification rationale behind _MAX_FILE_SIZE_BYTES doesn't
 # apply here -- but scan_frames' worst-case adversarial cost is still O(n)
-# in wall-clock time regardless of what backs `data`. ~150 MB/s (measured
-# against a 20.6MB file of minimum-size MPEG2.5 frames -- see SECURITY.md)
-# is the valid-frame-carpet case, where _parse_header only runs once per
-# frame; it is not the true worst case. The true worst case is a buffer
-# that never forms a valid sync at all (e.g. a carpet of 0xFF bytes),
-# forcing a per-byte _parse_header attempt -- measured at ~6 MB/s (1-8MB
-# all-0xFF buffers). At that rate, scanning the full 2 GiB cap byte-by-byte
-# would take ~5.5 minutes -- but scan_frames never actually gets there on
-# adversarial input: _MAX_CONSECUTIVE_RESYNC_FAILURES (below) aborts the
-# scan after a bounded run of consecutive failed resync attempts, long
-# before byte count alone would force the issue. This 2 GiB cap is safe
-# against the adversarial case for that reason, not because the raw scan
-# is fast enough to finish -- it isn't. It still matters for the
-# valid-frame-carpet case (every failed attempt there is followed by a
-# real frame, so the resync-count bound never trips), where ~150 MB/s
-# keeps a full 2 GiB scan to ~14s.
+# in wall-clock time regardless of what backs `data`. ~90 MB/s (measured
+# against a 20.6MB file of minimum-size MPEG2.5 frames -- see SECURITY.md
+# and bench/security_claims.py; hardware-dependent, re-measure rather than
+# treating this as a portable constant) is the valid-frame-carpet case,
+# where _parse_header only runs once per frame; it is not the true worst
+# case. The true worst case is a buffer that never forms a valid sync at
+# all (e.g. a carpet of 0xFF bytes), forcing a per-byte _parse_header
+# attempt -- measured at ~6 MB/s (1-8MB all-0xFF buffers). At that rate,
+# scanning the full 2 GiB cap byte-by-byte would take ~5.5 minutes -- but
+# scan_frames never actually gets there on adversarial input:
+# _MAX_CONSECUTIVE_RESYNC_FAILURES (below) aborts the scan after a bounded
+# run of consecutive failed resync attempts, long before byte count alone
+# would force the issue. This 2 GiB cap is safe against the adversarial
+# case for that reason, not because the raw scan is fast enough to finish
+# -- it isn't. It still matters for the valid-frame-carpet case (every
+# failed attempt there is followed by a real frame, so the resync-count
+# bound never trips), where ~90 MB/s keeps a full 2 GiB scan to well under
+# a minute.
 #
 # Must stay under 4 GiB: frame offsets are stored in an array("I") (4-byte
 # unsigned int, max ~4.29 GB) in scan_frames below -- raising this cap past
@@ -154,14 +156,15 @@ _MAX_MMAP_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 # at ~6 MB/s (~160ns/byte -- see _MAX_MMAP_FILE_SIZE_BYTES above). Without
 # this bound, that reaches ~5.5 minutes before the 2 GiB use_mmap cap forces
 # the issue. 2,000,000 consecutive failed attempts, at that same ~160ns
-# each, is ~320ms (measured; see the A9 follow-up fix commit) -- tight
-# enough to keep worst-case cost sub-second regardless of which size cap
-# applies, while generous enough that no legitimate file trips it: a real
-# file's non-frame bytes are its ID3v2 tag, already skipped by id3v2_size
-# before this loop starts, and 2,000,000 consecutive candidate-but-invalid
-# 0xFF bytes with no real frame in between anywhere else is far beyond what
-# any genuinely corrupted-but-real MP3 (a few damaged frames, a stray
-# ID3v1/APE trailer) would ever produce.
+# each, is ~360ms (measured; see bench/security_claims.py and the A9
+# follow-up fix commit) -- tight enough to keep worst-case cost sub-second
+# regardless of which size cap applies, while generous enough that no
+# legitimate file trips it: a real file's non-frame bytes are its ID3v2
+# tag, already skipped by id3v2_size before this loop starts, and
+# 2,000,000 consecutive candidate-but-invalid 0xFF bytes with no real frame
+# in between anywhere else is far beyond what any genuinely
+# corrupted-but-real MP3 (a few damaged frames, a stray ID3v1/APE trailer)
+# would ever produce.
 _MAX_CONSECUTIVE_RESYNC_FAILURES = 2_000_000
 
 _MIB_PER_GIB = 1024  # used to format FileTooLargeError's message below
@@ -207,15 +210,18 @@ class Frames(Sequence["Frame"]):
     """A memory-compact, lazily-materialized sequence of Frame.
 
     Backed by four parallel array.array buffers (packed, unboxed values)
-    instead of a list of Frame objects -- ~24 bytes/frame vs. ~168
-    bytes/frame for an equivalent list[Frame], since no per-frame Python
-    object or boxed int/float is allocated until you actually index into
-    it. Supports the same operations a list[Frame] does: len(), positive
-    and negative indexing, slicing (returns another Frames, sharing the
-    same backing arrays -- slicing never copies), and iteration. Stepped
-    slicing (e.g. frames[::2]) is not supported and raises TypeError --
-    real step support for this array-backed view is nontrivial and not
-    needed by any caller in this codebase.
+    instead of a list of Frame objects -- ~24 bytes/frame vs. ~128
+    bytes/frame for an equivalent list[Frame] (measured; see SECURITY.md),
+    since no per-frame Python object or boxed int/float is allocated until
+    you actually index into it. Supports the same operations a list[Frame]
+    does: len(), positive and negative indexing, slicing (returns another
+    Frames, sharing the same backing arrays -- slicing never copies), and
+    iteration. Stepped slicing (e.g. frames[::2]) is not supported and
+    raises TypeError -- real step support for this array-backed view is
+    nontrivial and not needed by any caller in this codebase. Unlike
+    list[Frame], equality is identity-based: this class defines no
+    __eq__, so two Frames views over equal underlying data are only ==
+    if they're the same object.
 
     Not constructed directly by callers -- returned by scan_frames and
     found on AudioStream.frames.
@@ -584,9 +590,12 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
 
     Returns:
         A Frames sequence in file order, each with byte offset/length and
-        cumulative start_ms/duration_ms. Behaves like list[Frame] (len(),
-        indexing, negative indexing, slicing, iteration) but is backed by
-        compact packed arrays rather than one Python object per frame.
+        cumulative start_ms/duration_ms. Supports len(), positive/negative
+        indexing, iteration, and slicing with a step of 1 (a stepped slice
+        raises TypeError) the same way list[Frame] does, but is backed by
+        compact packed arrays rather than one Python object per frame, and
+        compares by identity rather than value (see the Frames class
+        docstring for both caveats in full).
 
     Raises:
         UnsupportedMp3Error: No valid MPEG-1/2/2.5 Layer III frame was
