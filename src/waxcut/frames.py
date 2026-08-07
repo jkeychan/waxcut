@@ -150,6 +150,8 @@ _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
 # that would silently overflow there.
 _MAX_MMAP_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 
+_MIB_PER_GIB = 1024  # used to format FileTooLargeError's message below
+
 
 class FileTooLargeError(UnsupportedMp3Error):
     """Raised when input exceeds the applicable size limit.
@@ -873,9 +875,8 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
     file_size = path.stat().st_size
     max_size = _MAX_MMAP_FILE_SIZE_BYTES if use_mmap else _MAX_FILE_SIZE_BYTES
     if file_size > max_size:
-        mib_per_gib = 1024
         limit_mb = max_size / (1024 * 1024)
-        limit_str = f"{limit_mb / mib_per_gib:.0f} GB" if limit_mb >= mib_per_gib else f"{limit_mb:.0f} MB"
+        limit_str = f"{limit_mb / _MIB_PER_GIB:.0f} GB" if limit_mb >= _MIB_PER_GIB else f"{limit_mb:.0f} MB"
         raise FileTooLargeError(
             f"{path} is {file_size} bytes, exceeding the {max_size}-byte ({limit_str}) limit."
         )
