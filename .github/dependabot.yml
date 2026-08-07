@@ -31,3 +31,13 @@ updates:
       - "dependencies"
     commit-message:
       prefix: "deps"
+
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
