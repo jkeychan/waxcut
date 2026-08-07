@@ -23,7 +23,7 @@ _MS_PER_SECOND = 1000
 _MSF_FIELDS = 3  # MM:SS:FF has exactly 3 fields
 _MAX_SECONDS_FIELD = 60  # exclusive upper bound: valid range is 0-59
 _MAX_FRAME_FIELD = _CD_FRAMES_PER_SECOND  # exclusive upper bound: valid range is 0-74
-_MAX_MINUTES_FIELD = 1_000_000  # inclusive upper bound: keeps the ms conversion within float range
+_MAX_MINUTES_FIELD = 1_000_000  # inclusive upper bound: a sanity cap, ~1.9 years of audio
 
 
 class CueSheetError(WaxcutError):
