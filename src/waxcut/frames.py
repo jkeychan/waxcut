@@ -735,7 +735,7 @@ class AudioStream:
         self.close()
 
 
-def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
+def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStream:
     """Load an MP3 file and parse all its frames for frame-accurate splitting.
 
     Opens and reads the file, scans it for MPEG Layer III frames (skipping
@@ -751,7 +751,8 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
     the whole thing in RAM just to locate frame boundaries.
 
     Args:
-        path: Path to an MP3 file on disk.
+        path: Path to an MP3 file on disk. A str is accepted too, coerced
+            to a Path immediately via Path(path).
         use_mmap: If True, memory-map the file instead of reading it into a
             bytes object. AudioStream.data is then an mmap.mmap rather than
             bytes -- scan_frames/slice_bytes/etc. work identically either
@@ -790,6 +791,7 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
             is never read or mapped in the first place. See SECURITY.md.
         FileNotFoundError: The file at `path` does not exist.
     """
+    path = Path(path)
     file_size = path.stat().st_size
     max_size = _MAX_MMAP_FILE_SIZE_BYTES if use_mmap else _MAX_FILE_SIZE_BYTES
     if file_size > max_size:

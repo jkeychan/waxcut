@@ -430,6 +430,17 @@ def test_vbri_tag_found_at_fixed_offset_for_non_mpeg1_stereo_frame(tmp_path):
     assert stream.frames[0].offset == frame_length
 
 
+def test_load_audio_stream_accepts_a_str_path(fixture_path):
+    # load_audio_stream called path.stat()/path.open() directly, so a str
+    # argument raised a raw, undocumented AttributeError instead of the
+    # FileNotFoundError/UnsupportedMp3Error/etc. contract the docstring
+    # promises -- coercing via Path(path) makes str behave identically to
+    # an already-constructed Path.
+    from_str = waxcut.load_audio_stream(str(fixture_path))
+    from_path = waxcut.load_audio_stream(fixture_path)
+    assert list(from_str.frames) == list(from_path.frames)
+
+
 def test_load_audio_stream_use_mmap_produces_identical_frames(fixture_path):
     normal = waxcut.load_audio_stream(fixture_path)
     with waxcut.load_audio_stream(fixture_path, use_mmap=True) as mmapped:
