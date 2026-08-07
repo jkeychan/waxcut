@@ -283,6 +283,9 @@ def _syncsafe(n: int) -> bytes:
     return bytes(((n >> shift) & 0x7F) for shift in (21, 14, 7, 0))
 
 
+_FORBIDDEN_TEXT_CHARS = ("\x00", "\r", "\n")
+
+
 def _encode_text(text: str) -> bytes:
     """ID3v2.3 text-frame content: 1-byte encoding flag + encoded text.
 
@@ -291,7 +294,20 @@ def _encode_text(text: str) -> bytes:
     little-endian BOM (encoding byte 0x01) otherwise. UTF-8 (encoding byte
     0x03) is a v2.4-only addition and is invalid in a v2.3 tag, which is
     why this doesn't just always use UTF-8.
+
+    Raises:
+        ValueError: `text` contains NUL, CR, or LF -- these pass through
+            the encoding step unremarked, but a NUL truncates the field
+            for any reader that treats it as a C string terminator, and
+            CR/LF can make what's stored differ from what's displayed
+            (e.g. multi-line-looking output from a single-line field).
+            Rejecting them is safer than silently stripping, which could
+            surprise a caller with different content than what they
+            passed in.
     """
+    for char in _FORBIDDEN_TEXT_CHARS:
+        if char in text:
+            raise ValueError(f"write_id3v2_tag() text fields cannot contain {char!r}, got {text!r}")
     try:
         return _LATIN1_ENCODING_BYTE + text.encode("latin-1")
     except UnicodeEncodeError:
@@ -324,6 +340,17 @@ def write_id3v2_tag(
     and refuses to tag over it (see Raises below) rather than stacking a
     second tag on top of it.
 
+    Known limitation: this function does not implement ID3v2 unsynchronisation
+    (the spec-defined scheme of inserting a 0x00 byte after every 0xFF byte
+    in the tag body, so a false MPEG sync pattern can never occur inside a
+    tag). A crafted title/artist could in principle contain bytes that,
+    combined with adjacent frame bytes, form a false MPEG sync word (e.g.
+    0xFF 0xFB) inside the tag body -- waxcut itself is unaffected (it always
+    skips the tag via id3v2_size before scanning for frames), but a naive or
+    non-compliant player that doesn't honor unsynchronisation, or that scans
+    for sync words without first parsing the ID3v2 header, could misdecode
+    tag bytes as audio before the real content. See SECURITY.md.
+
     Args:
         data: Bytes to tag, typically the output of slice_bytes or one
             element of split_at's return value. Coerced to bytes via
@@ -340,7 +367,8 @@ def write_id3v2_tag(
         `data`, unmodified.
 
     Raises:
-        ValueError: `track` is given and is less than 1, `data` already
+        ValueError: `track` is given and is less than 1, `title`/`artist`
+            contains NUL, CR, or LF (see _encode_text), `data` already
             starts with an ID3v2 tag (stacking a second tag on top would
             corrupt frame scanning, since scan_frames/id3v2_size only ever
             skip the outermost tag), or the combined size of the requested

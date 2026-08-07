@@ -220,6 +220,18 @@ def test_write_id3v2_tag_syncsafe_guard_rejects_oversized_frame_payload():
         waxcut.write_id3v2_tag(b"data", title=huge_title)
 
 
+@pytest.mark.parametrize("forbidden_char", ["\x00", "\r", "\n"])
+def test_write_id3v2_tag_rejects_nul_cr_lf_in_text_fields(forbidden_char):
+    # NUL/CR/LF pass through Latin-1/UTF-16 text encoding unremarked, so
+    # displayed content (a NUL-truncated string, or CR/LF making a
+    # single-line field look multi-line) could silently differ from what
+    # was actually stored -- reject rather than silently strip.
+    with pytest.raises(ValueError, match="cannot contain"):
+        waxcut.write_id3v2_tag(b"data", title=f"a{forbidden_char}b")
+    with pytest.raises(ValueError, match="cannot contain"):
+        waxcut.write_id3v2_tag(b"data", artist=f"a{forbidden_char}b")
+
+
 def test_audio_stream_close_is_a_noop_without_mmap(fixture_path):
     stream = waxcut.load_audio_stream(fixture_path)
     stream.close()  # must not raise

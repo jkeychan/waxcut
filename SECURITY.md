@@ -42,13 +42,27 @@ unhandled exception.
 
 `write_id3v2_tag` writes attacker-influenceable text (a caller-supplied
 title/artist, which may itself originate from untrusted `.cue` metadata)
-into binary tag frames. Two guards keep that bounded and unambiguous: the
-combined frame payload is capped at the ID3v2 tag-size field's own limit
-(a 4-byte syncsafe integer, ~256 MB), raising `ValueError` if exceeded; and
-`write_id3v2_tag` raises `ValueError` rather than writing a second tag if
-`data` already has a leading ID3v2 tag, since a stacked tag would shift
-where frame scanning starts and corrupt output — a parser-confusion bug
-class, not just a correctness one.
+into binary tag frames. Several guards keep that bounded and unambiguous:
+the combined frame payload is capped at the ID3v2 tag-size field's own
+limit (a 4-byte syncsafe integer, ~256 MB), raising `ValueError` if
+exceeded; `write_id3v2_tag` raises `ValueError` rather than writing a
+second tag if `data` already has a leading ID3v2 tag, since a stacked tag
+would shift where frame scanning starts and corrupt output — a
+parser-confusion bug class, not just a correctness one; and NUL/CR/LF are
+rejected outright in title/artist text, since they'd otherwise pass
+through Latin-1/UTF-16 encoding unremarked and make stored content
+silently differ from displayed content.
+
+Known limitation: `write_id3v2_tag` does not implement ID3v2
+unsynchronisation (the spec-defined scheme that guarantees a false MPEG
+sync pattern can never occur inside a tag body, by inserting a 0x00 byte
+after every 0xFF byte and setting a flag telling compliant readers to
+undo that). A crafted title/artist could in principle produce a false
+sync word (e.g. `0xFF 0xFB`) inside the written tag. waxcut itself is
+unaffected — it always skips the tag via `id3v2_size` before scanning for
+frames — but a non-compliant player that scans for sync words without
+first parsing the ID3v2 header could misdecode tag bytes as audio ahead
+of the real content. Tracked as a follow-up, not implemented yet.
 
 ## Reporting a Vulnerability
 
