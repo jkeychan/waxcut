@@ -951,9 +951,14 @@ def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
         segment is a standalone, decodable MP3 stream, byte-identical to
         the corresponding span of stream.data. Concatenating all segments
         (see join_frames) reproduces the original audio exactly, for any
-        input order. Each segment is fresh, independent bytes — safe to
-        use even after closing an mmap-backed stream (see
-        AudioStream.close()).
+        input order — safe because MPEG Layer III frames are
+        self-delimited (each carries its own length in its header), so
+        rejoining segment boundaries never needs re-parsing or
+        re-alignment. Not the original file bytes, though: leading ID3v2
+        tags, the VBR header frame, and any trailer aren't carried into
+        split output, so they're absent from a rejoin too. Each segment
+        is fresh, independent bytes — safe to use even after closing an
+        mmap-backed stream (see AudioStream.close()).
     """
     # Sorted so the pairwise ranges below are non-overlapping: unsorted
     # indices would pair into ranges that revisit the same frames, and
@@ -1008,13 +1013,8 @@ def split_to_files(stream: AudioStream, timestamps_ms: Sequence[float], output_p
 def join_frames(segments: list[bytes]) -> bytes:
     """Concatenate frame-aligned MP3 byte segments back into one stream.
 
-    MPEG Layer III frames are self-delimited — each one carries its own
-    length in its header — so concatenating segments produced by
-    slice_bytes/split_at is always safe and reproduces the joined audio
-    frame span exactly, with no need to re-parse or re-align anything. Not
-    the original file bytes, though: leading ID3v2 tags, the VBR header
-    frame, and any trailer aren't carried into split output, so they're
-    absent from a rejoin too.
+    b"".join(segments) plus the name: see split_at's docstring for why
+    this is always safe for segments produced by slice_bytes/split_at.
 
     Args:
         segments: Byte segments to join, in order, as produced by
