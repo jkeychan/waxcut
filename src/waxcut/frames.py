@@ -17,6 +17,7 @@ import enum
 import math
 import mmap
 import struct
+import warnings
 from array import array
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -142,14 +143,20 @@ _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
 # attempt -- measured at ~6 MB/s (1-8MB all-0xFF buffers). At that rate,
 # scanning the full 2 GiB cap byte-by-byte would take ~5.5 minutes -- but
 # scan_frames never actually gets there on adversarial input:
-# _MAX_CONSECUTIVE_RESYNC_FAILURES (below) aborts the scan after a bounded
-# run of consecutive failed resync attempts, long before byte count alone
-# would force the issue. This 2 GiB cap is safe against the adversarial
-# case for that reason, not because the raw scan is fast enough to finish
-# -- it isn't. It still matters for the valid-frame-carpet case (every
-# failed attempt there is followed by a real frame, so the resync-count
-# bound never trips), where ~90 MB/s keeps a full 2 GiB scan to well under
-# a minute.
+# _MAX_TOTAL_RESYNC_FAILURES (below) aborts the scan once the *cumulative*
+# count of failed resync attempts across the whole scan exceeds the cap,
+# long before byte count alone would force the issue. Counting cumulatively
+# (not resetting on each successfully located frame) matters: an earlier
+# version of this bound reset on every accepted frame, so an attacker could
+# keep the running count under the cap indefinitely by planting one valid
+# frame every ~1.9 MB of adversarial filler, defeating the bound entirely
+# (measured ~50s on a 248 MiB file built exactly that way -- see the
+# regression test). This 2 GiB cap is safe against the adversarial case for
+# the cumulative-cap reason, not because the raw scan is fast enough to
+# finish -- it isn't. It still matters for the valid-frame-carpet case
+# (every failed attempt there is followed by a real frame, so cumulative
+# failures never accumulate meaningfully), where ~90 MB/s keeps a full
+# 2 GiB scan to well under a minute.
 #
 # Must stay under 4 GiB: frame offsets are stored in an array("I") (4-byte
 # unsigned int, max ~4.29 GB) in scan_frames below -- raising this cap past
@@ -161,17 +168,20 @@ _MAX_MMAP_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 # carpet of 0xFF bytes) forces a per-byte _parse_header attempt, measured
 # at ~6 MB/s (~160ns/byte -- see _MAX_MMAP_FILE_SIZE_BYTES above). Without
 # this bound, that reaches ~5.5 minutes before the 2 GiB use_mmap cap forces
-# the issue. 2,000,000 consecutive failed attempts, at that same ~160ns
-# each, is ~360ms (measured; see bench/security_claims.py and the A9
-# follow-up fix commit) -- tight enough to keep worst-case cost sub-second
-# regardless of which size cap applies, while generous enough that no
-# legitimate file trips it: a real file's non-frame bytes are its ID3v2
-# tag, already skipped by id3v2_size before this loop starts, and
-# 2,000,000 consecutive candidate-but-invalid 0xFF bytes with no real frame
-# in between anywhere else is far beyond what any genuinely
+# the issue. 2,000,000 failed attempts, at that same ~160ns each, is ~360ms
+# (measured; see bench/security_claims.py) -- tight enough to keep
+# worst-case cost sub-second regardless of which size cap applies, while
+# generous enough that no legitimate file trips it: a real file's non-frame
+# bytes are its ID3v2 tag, already skipped by id3v2_size before this loop
+# starts, and 2,000,000 candidate-but-invalid 0xFF bytes with no real frame
+# to explain them anywhere in the file is far beyond what any genuinely
 # corrupted-but-real MP3 (a few damaged frames, a stray ID3v1/APE trailer)
 # would ever produce.
-_MAX_CONSECUTIVE_RESYNC_FAILURES = 2_000_000
+#
+# This count is cumulative across the entire scan, not reset when a frame
+# is successfully located -- see _resync_failed's docstring in scan_frames
+# for why resetting on success was a real, exploitable gap.
+_MAX_TOTAL_RESYNC_FAILURES = 2_000_000
 
 _MIB_PER_GIB = 1024  # used to format FileTooLargeError's message below
 
@@ -611,16 +621,18 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
             found anywhere in `data`. This is the correct outcome for
             non-MP3 files, empty input, and Layer I/II files (rejected
             on purpose — see module docstring). Also raised if
-            _MAX_CONSECUTIVE_RESYNC_FAILURES consecutive candidate sync
-            bytes each fail header validation without a real frame in
-            between *and* no frame has been located yet -- input that
-            looks nothing like an MP3 from the start is rejected quickly
-            instead of scanning all the way to max_size (see
-            _MAX_CONSECUTIVE_RESYNC_FAILURES's own comment). If frames
-            were already found before the resync-failure streak began,
-            the bound still trips at the same point, but scan_frames
-            returns those frames instead of raising -- the same outcome
-            as when `data` simply runs out via find() returning -1.
+            _MAX_TOTAL_RESYNC_FAILURES candidate sync bytes, cumulative
+            across the whole scan, each fail header validation without
+            enough real frames in between to explain them *and* no frame
+            has been located yet -- input that looks nothing like an MP3
+            from the start is rejected quickly instead of scanning all the
+            way to max_size (see _MAX_TOTAL_RESYNC_FAILURES's own comment).
+            If frames were already found before the cap tripped, the bound
+            still trips at the same point, but scan_frames returns those
+            frames instead of raising -- the same outcome as when `data`
+            simply runs out via find() returning -1, except a
+            UserWarning is also raised, since unlike genuine EOF this
+            means the scan gave up before reaching the end of `data`.
         FileTooLargeError: `data` exceeds max_size. See SECURITY.md.
     """
     if max_size is None:
@@ -633,19 +645,29 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
     start_ms_values: array[float] = array("d")
     duration_ms_values: array[float] = array("d")
     cursor_ms = 0.0
-    consecutive_resync_failures = 0
+    total_resync_failures = 0
     resync_cap_hit = False
 
     def _resync_failed() -> bool:
         # Called on every failed resync attempt (a candidate 0xFF byte
-        # that didn't turn into a real frame). Unbounded consecutive
-        # failures is exactly the adversarial cost _MAX_CONSECUTIVE_RESYNC_FAILURES
-        # guards against -- see its own comment above. Returns True once
-        # the cap trips, so the caller can stop scanning (same worst-case
-        # time bound either way) without discarding frames already found.
-        nonlocal consecutive_resync_failures
-        consecutive_resync_failures += 1
-        return consecutive_resync_failures > _MAX_CONSECUTIVE_RESYNC_FAILURES
+        # that didn't turn into a real frame). This count is cumulative
+        # across the ENTIRE scan and must never be reset when a frame is
+        # successfully located -- an earlier version reset it on every
+        # accepted frame, which let an attacker keep the running count
+        # under the cap indefinitely by planting one valid frame every
+        # ~1.9 MB of adversarial filler (measured ~50s on a 248 MiB file
+        # built exactly that way, against a documented "sub-second" bound
+        # -- see the regression test and _MAX_TOTAL_RESYNC_FAILURES's own
+        # comment). Counting cumulatively closes that gap: a real file's
+        # non-frame bytes are its ID3v2 tag (already skipped) plus at most
+        # a small trailer, so legitimate files never accumulate anywhere
+        # near the cap regardless of how many valid frames they contain.
+        # Returns True once the cap trips, so the caller can stop scanning
+        # (same worst-case time bound either way) without discarding
+        # frames already found.
+        nonlocal total_resync_failures
+        total_resync_failures += 1
+        return total_resync_failures > _MAX_TOTAL_RESYNC_FAILURES
 
     while True:
         # Every valid sync requires the byte at `offset` to be exactly 0xFF
@@ -676,7 +698,6 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
                 resync_cap_hit = True
                 break
             continue
-        consecutive_resync_failures = 0
 
         samples = _SAMPLES_PER_FRAME[version]
         duration_ms = samples / sample_rate * 1000
@@ -700,11 +721,24 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
     if not offsets:
         if resync_cap_hit:
             raise UnsupportedMp3Error(
-                "No valid MPEG audio frame found in the first "
-                f"{_MAX_CONSECUTIVE_RESYNC_FAILURES} consecutive resync attempts; "
-                "giving up rather than scanning the rest of the input."
+                f"No valid MPEG audio frame found in {_MAX_TOTAL_RESYNC_FAILURES} "
+                "total failed resync attempts; giving up rather than scanning "
+                "the rest of the input."
             )
         raise UnsupportedMp3Error("No valid MPEG audio frames found.")
+    if resync_cap_hit:
+        # Frames were found, but the scan gave up before reaching the end of
+        # `data` -- unlike genuine EOF (find() returning -1), this means
+        # there may be more real audio after the point the scan abandoned,
+        # discarded silently unless the caller is told. See scan_frames'
+        # own Raises: docstring for the full rationale.
+        warnings.warn(
+            f"scan_frames stopped after {_MAX_TOTAL_RESYNC_FAILURES} total failed "
+            f"resync attempts, before reaching the end of the input -- returning "
+            f"the {len(offsets)} frame(s) found so far; any audio after the point "
+            "the scan gave up is not included.",
+            stacklevel=2,
+        )
     return Frames(offsets, lengths, start_ms_values, duration_ms_values)
 
 

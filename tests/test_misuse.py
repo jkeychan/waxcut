@@ -200,10 +200,10 @@ def test_scan_frames_bounds_adversarial_resync_cost():
     # large max_size is. Uses the real (unpatched) cap, sized just past
     # it -- 2MB, not gigabytes -- so this actually exercises production
     # behavior rather than a monkeypatched stand-in.
-    cap = waxcut.frames._MAX_CONSECUTIVE_RESYNC_FAILURES
+    cap = waxcut.frames._MAX_TOTAL_RESYNC_FAILURES
     adversarial = b"\xff" * (cap + 1000)
     start = time.perf_counter()
-    with pytest.raises(waxcut.UnsupportedMp3Error, match="consecutive resync attempts"):
+    with pytest.raises(waxcut.UnsupportedMp3Error, match="total failed resync attempts"):
         waxcut.scan_frames(adversarial, max_size=len(adversarial))
     elapsed = time.perf_counter() - start
     assert elapsed < 5.0  # measured ~0.3s locally; was ~5.5 minutes pre-fix at 2 GiB
@@ -225,17 +225,47 @@ def _mpeg1_stereo_128kbps_frame() -> bytes:
 
 
 def test_scan_frames_returns_located_frames_when_resync_cap_trips_after_valid_frames():
-    # #6 regression: hitting _MAX_CONSECUTIVE_RESYNC_FAILURES used to raise
+    # #6 regression: hitting _MAX_TOTAL_RESYNC_FAILURES used to raise
     # UnsupportedMp3Error unconditionally, discarding every valid frame
     # already located -- unlike the natural-exhaustion case (find()
     # returning -1), which returns partial results. A genuinely-corrupt-
     # but-mostly-valid MP3 (a large trailing junk section) must still get
     # its already-located valid frames back instead of losing them all.
-    cap = waxcut.frames._MAX_CONSECUTIVE_RESYNC_FAILURES
+    # Must also warn, since (unlike genuine EOF) real audio may have been
+    # silently left unscanned past the point the cap tripped.
+    cap = waxcut.frames._MAX_TOTAL_RESYNC_FAILURES
     valid_prefix = _mpeg1_stereo_128kbps_frame() * 200
     adversarial_trailer = b"\xff" * (cap + 1000)
-    frames = waxcut.scan_frames(valid_prefix + adversarial_trailer)
+    with pytest.warns(UserWarning, match="200 frame"):
+        frames = waxcut.scan_frames(valid_prefix + adversarial_trailer)
     assert len(frames) == 200
+
+
+def test_scan_frames_bounds_total_resync_cost_even_with_periodic_valid_frames():
+    # C1 regression: an earlier version reset the failure count on every
+    # successfully located frame, so an attacker could keep the running
+    # count under the cap indefinitely by planting one valid frame every
+    # ~1.9 MB of adversarial filler -- defeating the bound entirely despite
+    # the buffer being almost all adversarial junk. Interleave a real frame
+    # every few thousand failed resyncs (far below the real ~1.9 MB/frame
+    # exploit ratio, but enough to prove the count survives a successful
+    # frame) and confirm the cap still trips in bounded time instead of
+    # scanning to max_size.
+    cap = waxcut.frames._MAX_TOTAL_RESYNC_FAILURES
+    junk_chunk = b"\xff" * 1000
+    valid_frame = _mpeg1_stereo_128kbps_frame()
+    # Interleave enough (junk, frame) pairs to exceed the cap in total
+    # resync failures, though no single junk run comes close on its own --
+    # a pre-fix (consecutive-counting) implementation would never trip the
+    # cap on this input and would instead scan all the way to max_size.
+    repeats = cap // len(junk_chunk) + 10
+    adversarial = (junk_chunk + valid_frame) * repeats
+    start = time.perf_counter()
+    with pytest.warns(UserWarning, match="total failed resync attempts"):
+        frames = waxcut.scan_frames(adversarial, max_size=len(adversarial))
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5.0  # pre-fix, this would scan to max_size at ~6 MB/s
+    assert len(frames) < repeats  # cap tripped before scanning the whole input
 
 
 def test_scan_frames_still_raises_for_pure_adversarial_input_from_byte_zero():
@@ -243,9 +273,9 @@ def test_scan_frames_still_raises_for_pure_adversarial_input_from_byte_zero():
     # still the genuine DoS case this bound exists to catch (input that
     # looks nothing like an MP3 from the start), and must still raise
     # rather than silently succeed with an empty Frames.
-    cap = waxcut.frames._MAX_CONSECUTIVE_RESYNC_FAILURES
+    cap = waxcut.frames._MAX_TOTAL_RESYNC_FAILURES
     adversarial = b"\xff" * (cap + 1000)
-    with pytest.raises(waxcut.UnsupportedMp3Error, match="consecutive resync attempts"):
+    with pytest.raises(waxcut.UnsupportedMp3Error, match="total failed resync attempts"):
         waxcut.scan_frames(adversarial, max_size=len(adversarial))
 
 
