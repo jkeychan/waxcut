@@ -156,7 +156,7 @@ binary tag frames, rather than only reading and validating bytes handed to
 it. That text isn't necessarily hand-typed: a realistic pipeline pulls it
 straight from `parse_cue_sheet`'s `TITLE`/`PERFORMER` fields, which are
 themselves attacker-influenceable if the `.cue` file came from an untrusted
-source. Two guards keep that path bounded and unambiguous:
+source. Several guards keep that path bounded and unambiguous:
 
 - **Size**: the combined `TIT2`/`TPE1`/`TRCK` frame payload is capped by
   the ID3v2 tag format's own size field — a 4-byte syncsafe integer, whose
@@ -172,6 +172,23 @@ source. Two guards keep that path bounded and unambiguous:
   That's a parser-confusion bug class, the same family fuzzing (above)
   exists to catch, even though this particular case is a deterministic
   input-validation guard rather than something fuzzing found.
+- **No NUL/CR/LF in text fields**: `title`/`artist` containing NUL, CR, or
+  LF raise `ValueError` rather than passing through Latin-1/UTF-16 encoding
+  unremarked. A NUL truncates the field for any reader that treats it as a
+  C string terminator, and CR/LF can make stored content differ from what's
+  displayed — rejecting them is safer than silently stripping, which could
+  surprise a caller with different content than what they passed in.
+
+**Known limitation**: `write_id3v2_tag` does not implement ID3v2
+unsynchronisation (the spec-defined scheme that guarantees a false MPEG
+sync pattern can never occur inside a tag body, by inserting a `0x00` byte
+after every `0xFF` byte and setting a flag telling compliant readers to
+undo that). A crafted title/artist could in principle produce a false sync
+word (e.g. `0xFF 0xFB`) inside the written tag. waxcut itself is
+unaffected — it always skips the tag via `id3v2_size` before scanning for
+frames — but a non-compliant player that scans for sync words without
+first parsing the ID3v2 header could misdecode tag bytes as audio ahead of
+the real content. Tracked as a follow-up, not implemented yet.
 
 ## Supply-chain and process posture
 
