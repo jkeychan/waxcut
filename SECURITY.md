@@ -15,13 +15,25 @@ entire file as a Python `bytes` object.
 
 `load_audio_stream(path, use_mmap=True)` memory-maps the file instead of
 reading it into memory, so that memory-cost rationale doesn't apply -- it's
-governed by a separate, larger 2 GB limit instead, which bounds the
-*time* cost of a worst-case adversarial scan instead (parsing is O(n) in
-file size regardless of what backs the data; measured ~150 MB/s against a
-file packed with minimum-size MPEG2.5 frames). Callers using `use_mmap=True`
-are responsible for calling `AudioStream.close()` (or using it as a context
-manager) when done -- the file handle stays open for the AudioStream's
-whole lifetime.
+governed by a separate, larger 2 GB limit instead, sized around *time* cost
+rather than memory. Parsing is O(n) in file size regardless of what backs
+the data, but the actual worst case depends heavily on the input's shape: a
+file packed with valid minimum-size frames scans at roughly 90 MB/s on this
+author's development machine (`bench/security_claims.py`, item 2 -- timings
+are hardware-dependent; re-run locally rather than treating this as a
+portable number), while a buffer that never forms a valid sync at all (e.g.
+a carpet of `0xFF` bytes) is far slower per byte -- around 5.5 MB/s in the
+same benchmark (item 3), since every byte forces a failed header-parse
+attempt. At that rate, scanning the full 2 GB cap byte-by-byte would take
+several minutes. `scan_frames` never actually gets there, though:
+`_MAX_CONSECUTIVE_RESYNC_FAILURES` aborts the scan after 2,000,000
+consecutive failed resync attempts -- about 360 ms in the same benchmark --
+long before byte count alone would force the issue. The 2 GB cap is safe
+against the adversarial case because of that bound, not because the raw
+scan rate is fast enough to finish in bounded time on its own. Callers
+using `use_mmap=True` are responsible for calling `AudioStream.close()` (or
+using it as a context manager) when done -- the file handle stays open for
+the AudioStream's whole lifetime.
 
 `use_mmap=True` is exercised in CI on Linux only -- the
 [`ci.yml`](https://github.com/jkeychan/waxcut/actions/workflows/ci.yml)
@@ -34,19 +46,27 @@ rather than assuming portability.
 A file packed with minimum-size MPEG2/2.5 Layer III frames (~24 bytes each)
 parses without crashing, at a rate proportional to input size — the size
 limits above bound that worst case for each mode. Located frames are stored
-in compact packed arrays (not individually-allocated objects), measured at
-~0.95x memory amplification over input size for an adversarial 10 MB file
-built this way — previously ~6x before that storage redesign. See the
+in compact packed arrays (not individually-allocated objects): for a 10 MB
+adversarial file built from the smallest legal frame this parser accepts
+(24 bytes), that storage measures roughly ~1.0x the input size (item 1 in
+`bench/security_claims.py`) — an equivalent `list[Frame]` of individually
+allocated objects measures roughly ~5.3x for the same input, which is what
+this design replaced. See the
 [docs site's Security page](https://waxcut.pages.dev/docs/security#resource-limits)
-for the full writeup and measurement methodology.
+for the full writeup, and `bench/security_claims.py` for the script these
+numbers came from.
 
 `parse_cue_sheet` has no size limit: it takes an already-materialized
 `str`, not a `Path`, so it has no I/O boundary of its own and a cap
 wouldn't bound anything the caller doesn't already control. Cue text
-amplifies further into parsed timestamps than frame parsing does (~3.9x
-measured, vs. ~0.95x above), and 40,000 adversarial/mutated cue inputs run
-through it during testing raised only `CueSheetError` -- never an
-unhandled exception.
+amplifies further into parsed timestamps than frame parsing does — a
+~6.5 MB cue sheet producing ~100,000 timestamps peaks around ~3.8x the
+input size (item 4 in `bench/security_claims.py`). Robustness against
+malformed cue text has been checked by hand-constructed edge cases (see
+`tests/test_cue_sheet.py`) rather than a continuous fuzzing harness — unlike
+`scan_frames`, `parse_cue_sheet` isn't yet wired into ClusterFuzzLite (see
+[Security](https://waxcut.pages.dev/docs/security#continuous-fuzzing) for
+exactly what the fuzzing harness does and doesn't cover).
 
 `write_id3v2_tag` writes attacker-influenceable text (a caller-supplied
 title/artist, which may itself originate from untrusted `.cue` metadata)
