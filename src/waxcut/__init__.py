@@ -2,7 +2,9 @@
 
 No ffmpeg, no subprocess, no decode step. Frames are located by scanning the
 file's own MPEG frame headers, and splits are made by byte-copying whole
-frames, so output is bit-identical to the source — just shorter.
+frames, so output is byte-identical to the corresponding span of the
+source audio frames — just shorter. Leading ID3v2 tags, the VBR header
+frame, and any trailer aren't carried into split output.
 
     from waxcut import load_audio_stream, frame_index_at, slice_bytes
 

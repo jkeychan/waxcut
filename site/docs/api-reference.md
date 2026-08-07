@@ -253,8 +253,11 @@ def join_frames(segments: list[bytes]) -> bytes
 
 Concatenates frame-aligned MP3 byte segments back into one stream. Safe
 because MPEG Layer III frames are self-delimited — each carries its own
-length in its header — so concatenation always reproduces the original
-bytes exactly, with no re-parsing or re-alignment needed.
+length in its header — so concatenation always reproduces the joined audio
+frame span exactly, with no re-parsing or re-alignment needed. Not the
+original file bytes, though: leading ID3v2 tags, the VBR header frame, and
+any trailer aren't carried into split output, so they're absent from a
+rejoin too.
 
 **Args**
 - `segments` (`list[bytes]`) — byte segments to join, in order, as
@@ -277,10 +280,11 @@ def write_id3v2_tag(
 
 Prepends a fresh, minimal ID3v2.3 tag onto `data`, writing `TIT2` (title),
 `TPE1` (artist), and `TRCK` (track number) frames for whichever fields are
-given. No padding, no footer, no attempt to detect or merge with a
-pre-existing tag already in `data` — this is meant to be called on
-[`slice_bytes`](#slice_bytes)/[`split_at`](#split_at) output, which never
-has a leading ID3v2 tag of its own.
+given. No padding, no footer. Intended for `data` that has no leading
+ID3v2 tag of its own, which is always true of
+[`slice_bytes`](#slice_bytes)/[`split_at`](#split_at) output: this function
+detects a pre-existing leading ID3v2 tag and refuses to tag over it (see
+Raises below) rather than stacking a second tag on top of it.
 
 Text is encoded per-frame: Latin-1 (ID3v2 encoding byte `0x00`) where the
 text allows it, UTF-16 with an explicit little-endian BOM (encoding byte
@@ -299,8 +303,11 @@ this v2.3 tag.
 - `bytes` — the ID3v2.3 tag followed immediately by `data`.
 
 **Raises**
-- `ValueError` — `track` is given and is less than `1`, or the combined
-  frame payload doesn't fit in a 4-byte ID3v2 syncsafe integer.
+- `ValueError` — `track` is given and is less than `1`, `data` already
+  starts with an ID3v2 tag (stacking a second tag on top would corrupt
+  frame scanning, since `scan_frames`/`id3v2_size` only ever skip the
+  outermost tag), or the combined frame payload doesn't fit in a 4-byte
+  ID3v2 syncsafe integer.
 
 ## `total_duration_ms`
 

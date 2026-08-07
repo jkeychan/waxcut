@@ -8,7 +8,10 @@ Frame-accurate, lossless MP3 splitting and duration parsing in pure Python —
 no ffmpeg, no subprocess, no decode step.
 
 Cuts are made by parsing the file's own MPEG frame headers and byte-copying
-whole frames: output is bit-identical to the source, just shorter.
+whole frames: output is byte-identical to the corresponding span of the
+source audio frames, just shorter — leading ID3v2 tags, the VBR header
+frame, and any trailer present in the source are not carried into split
+output.
 
 ## Install
 
@@ -54,7 +57,9 @@ for i, part in enumerate(parts):
 ## Tagging split output
 
 `write_id3v2_tag` writes a minimal ID3v2.3 tag (title/artist/track number)
-onto any `bytes` — typically one segment of `split_at`'s output:
+onto untagged `bytes` — typically one segment of `split_at`'s output, which
+never has a leading ID3v2 tag of its own. It refuses to tag data that
+already starts with an ID3v2 tag:
 
 ```python
 from pathlib import Path

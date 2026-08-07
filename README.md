@@ -13,7 +13,10 @@ Frame-accurate, lossless MP3 splitting and duration parsing in pure Python with
 no ffmpeg, no subprocess, no decode step.
 
 Cuts are made by parsing the file's own MPEG frame headers and byte-copying
-whole frames: output is bit-identical to the source, just shorter.
+whole frames: output is byte-identical to the corresponding span of the
+source audio frames, just shorter — leading ID3v2 tags, the VBR header
+frame, and any trailer present in the source are not carried into split
+output.
 
 ## Install
 
@@ -63,7 +66,9 @@ parts = split_at(stream, timestamps_ms=[90_000, 180_000, 270_000])
 for i, part in enumerate(parts):
     Path(f"part{i}.mp3").write_bytes(part)
 
-# join_frames is the inverse: reassembling parts reproduces the original
+# join_frames is the inverse: reassembling parts reproduces the source's
+# audio frame span (not the original file bytes -- tags/VBR header/trailer
+# aren't preserved)
 assert join_frames(parts) == slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
 ```
 

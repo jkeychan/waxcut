@@ -24,7 +24,8 @@ const FeatureList: FeatureItem[] = [
     description: (
       <>
         Cuts are made by byte-copying whole frames from the source file.
-        Output is bit-identical to the original, just shorter.
+        Output is byte-identical to the source audio frames, just shorter —
+        tags and VBR header metadata aren't carried into split output.
       </>
     ),
   },
