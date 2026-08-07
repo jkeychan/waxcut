@@ -41,6 +41,7 @@ from waxcut.frames import (
     scan_frames,
     slice_bytes,
     split_at,
+    split_to_files,
     total_duration_ms,
     write_id3v2_tag,
 )
@@ -71,6 +72,7 @@ __all__ = [
     "scan_frames",
     "slice_bytes",
     "split_at",
+    "split_to_files",
     "total_duration_ms",
     "write_id3v2_tag",
 ]

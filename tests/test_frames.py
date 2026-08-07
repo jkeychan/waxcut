@@ -257,6 +257,27 @@ def test_join_frames_empty_list_returns_empty_bytes():
     assert waxcut.join_frames([]) == b""
 
 
+def test_split_to_files_matches_split_at_segment_boundaries(fixture_path, tmp_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    duration = stream.playable_duration_ms
+    timestamps = [duration * 0.25, duration * 0.6]
+    expected = waxcut.split_at(stream, timestamps)
+
+    output_paths = [tmp_path / f"segment{i}.mp3" for i in range(len(expected))]
+    waxcut.split_to_files(stream, timestamps, output_paths)
+
+    written = [path.read_bytes() for path in output_paths]
+    assert written == expected
+    assert waxcut.join_frames(written) == waxcut.join_frames(waxcut.split_at(stream, timestamps))
+
+
+def test_split_to_files_rejects_mismatched_output_path_count(fixture_path, tmp_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    duration = stream.playable_duration_ms
+    with pytest.raises(ValueError, match="output_paths"):
+        waxcut.split_to_files(stream, [duration * 0.5], [tmp_path / "only_one.mp3"])
+
+
 def _mpeg1_stereo_128kbps_header(*, protection_bit: int) -> bytes:
     """A valid MPEG1 Layer III, 128kbps, 44100Hz, stereo frame header."""
     sync = 0x7FF << 21

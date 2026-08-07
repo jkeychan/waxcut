@@ -888,6 +888,47 @@ def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
     return [slice_bytes(stream.data, stream.frames, start, end) for start, end in pairwise(idxs)]
 
 
+def split_to_files(stream: AudioStream, timestamps_ms: Sequence[float], output_paths: Sequence[Path]) -> None:
+    """Split `stream` into segments at the given cut points, writing each to disk.
+
+    Same cut-point semantics as split_at (see its docstring for the full
+    explanation of sorting/clamping/duplicate-timestamp behavior), but
+    writes each segment straight to its own output path via
+    Path.write_bytes instead of returning them all as one list[bytes].
+    For a stream loaded with use_mmap=True, this avoids split_at's
+    failure mode of holding every segment (and therefore the whole file)
+    in the Python heap at once -- each segment is written and then
+    eligible for garbage collection before the next one is sliced. Note
+    this is about not accumulating *all* segments at once: each
+    individual segment is still fully materialized as one bytes object
+    by slice_bytes before being written, same as split_at.
+
+    Args:
+        stream: An AudioStream from load_audio_stream.
+        timestamps_ms: Desired cut points, in milliseconds. See split_at's
+            docstring for sorting/clamping/duplicate-timestamp semantics
+            -- identical here.
+        output_paths: One path per output segment, in ascending stream
+            order (not the order timestamps_ms was given in -- same
+            reordering split_at itself applies). Must have exactly
+            len(timestamps_ms) + 1 entries, one per segment split_at
+            would have returned. Existing files at these paths are
+            overwritten.
+
+    Raises:
+        ValueError: len(output_paths) != len(timestamps_ms) + 1.
+    """
+    idxs = sorted([0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)])
+    segment_count = len(idxs) - 1
+    if len(output_paths) != segment_count:
+        raise ValueError(
+            f"split_to_files() requires exactly {segment_count} output_paths "
+            f"for {len(timestamps_ms)} timestamps_ms, got {len(output_paths)}"
+        )
+    for (start, end), path in zip(pairwise(idxs), output_paths, strict=True):
+        path.write_bytes(slice_bytes(stream.data, stream.frames, start, end))
+
+
 def join_frames(segments: list[bytes]) -> bytes:
     """Concatenate frame-aligned MP3 byte segments back into one stream.
 
