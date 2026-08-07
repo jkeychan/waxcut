@@ -970,6 +970,11 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
             real audio data after it, or (use_mmap=True only) the file is
             empty -- matching the same error the default path raises for
             an empty file, rather than a platform-specific mmap ValueError.
+            Also raised if `path` isn't a regular file (a symlink to one is
+            fine, but a FIFO, character device, directory, or socket is
+            rejected before anything is read from it) -- st_size is 0 for
+            most of these, which would otherwise bypass the size limit
+            below entirely.
         FileTooLargeError: The file exceeds the applicable size limit --
             250 MB by default, or 2 GB with use_mmap=True. Checked against
             the file's size on disk before opening it, so an oversized file
@@ -977,6 +982,18 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
         FileNotFoundError: The file at `path` does not exist.
     """
     path = Path(path)
+    if path.exists() and not path.is_file():
+        # stat().st_size is 0 for character devices, FIFOs, and most of
+        # procfs -- reading past this point would bypass the size cap
+        # below entirely, since there'd be nothing to compare against
+        # (a FIFO with no writer hangs load_audio_stream forever; a
+        # character device like /dev/zero produces unbounded output).
+        # is_file() follows symlinks (a symlink to a real file is fine)
+        # but returns False for anything that isn't ultimately a regular
+        # file, which is exactly what needs rejecting here. Guarded by
+        # exists() first so a genuinely missing path still raises
+        # FileNotFoundError below, not this.
+        raise UnsupportedMp3Error(f"{path} is not a regular file.")
     file_size = path.stat().st_size
     max_size = _MAX_MMAP_FILE_SIZE_BYTES if use_mmap else _MAX_FILE_SIZE_BYTES
     if file_size > max_size:

@@ -3,6 +3,7 @@ fed malformed MP3 data (see test_frames.py for that side of things)."""
 
 import math
 import mmap
+import os
 import struct
 import time
 from pathlib import Path
@@ -134,13 +135,29 @@ def test_load_audio_stream_missing_file_raises_file_not_found():
 
 
 def test_load_audio_stream_directory_raises():
-    with pytest.raises((IsADirectoryError, PermissionError)):
+    # C2 fix side effect: is_file() rejects a directory before any read is
+    # attempted, so this is now the documented UnsupportedMp3Error rather
+    # than a platform-specific, undocumented IsADirectoryError/PermissionError.
+    with pytest.raises(waxcut.UnsupportedMp3Error, match="not a regular file"):
         waxcut.load_audio_stream(FIXTURES)
 
 
 def test_load_audio_stream_non_mp3_file_raises_unsupported():
     with pytest.raises(waxcut.UnsupportedMp3Error):
         waxcut.load_audio_stream(FIXTURES / "not_an_mp3.txt")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo is POSIX-only")
+def test_load_audio_stream_rejects_a_fifo_instead_of_hanging(tmp_path):
+    # C2 regression: st_size is 0 for a FIFO, so the size-cap check silently
+    # passed and load_audio_stream then blocked forever in read_bytes()
+    # waiting for a writer that will never come -- found by a fresh
+    # adversarial code review. is_file() must reject it before any read is
+    # attempted, so this returns immediately instead of hanging.
+    fifo_path = tmp_path / "pipe.mp3"
+    os.mkfifo(fifo_path)
+    with pytest.raises(waxcut.UnsupportedMp3Error, match="not a regular file"):
+        waxcut.load_audio_stream(fifo_path)
 
 
 def test_scan_frames_rejects_empty_bytes():
