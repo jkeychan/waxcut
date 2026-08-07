@@ -794,6 +794,17 @@ def scan_frames(data: _RawBytes, *, max_size: int | None = None) -> Frames:
             means the scan gave up before reaching the end of `data`.
         FileTooLargeError: `data` exceeds max_size. See SECURITY.md.
     """
+    if isinstance(data, memoryview):
+        # A bare AttributeError from the .find() call below (memoryview has
+        # no .find()) is an unhelpful way to discover this -- memoryview is
+        # the single most obvious "bytes-like" type someone would reach for
+        # specifically to avoid a copy, and this docstring already warns
+        # it's not accepted; a clear, actionable message beats a stack
+        # trace pointing at an internal implementation detail. Found by a
+        # fresh adversarial code review.
+        raise TypeError(
+            "scan_frames() does not accept memoryview (no .find() method) -- pass bytes(data) instead."
+        )
     if max_size is None:
         max_size = _MAX_FILE_SIZE_BYTES
     if len(data) > max_size:

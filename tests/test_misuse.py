@@ -347,6 +347,16 @@ def test_write_id3v2_tag_accepts_memoryview_input():
     assert isinstance(tagged, bytes)
 
 
+def test_scan_frames_rejects_memoryview_with_a_clear_message():
+    # N17 regression: scan_frames's docstring already warned memoryview
+    # isn't accepted, but the actual failure was a bare, unhelpful
+    # AttributeError ('memoryview' object has no attribute 'find') from
+    # deep inside the scan loop instead of a clear message at the door.
+    # Found by a fresh adversarial code review.
+    with pytest.raises(TypeError, match="does not accept memoryview"):
+        waxcut.scan_frames(memoryview(b"\x00" * 20))
+
+
 def test_write_id3v2_tag_syncsafe_guard_rejects_oversized_frame_payload():
     # A pathologically large title is real user-input misuse (a caller
     # passing e.g. an entire file's contents as "title" by mistake), not
