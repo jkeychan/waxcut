@@ -8,6 +8,13 @@ examples) -- kept out of this docstring to avoid duplicating it.
 
 from __future__ import annotations
 
+import re
+
+# Optional leading "-" is allowed through so a negative minutes field still
+# reaches the dedicated "invalid minutes field" range check below instead of
+# being misreported as non-numeric.
+_ASCII_DIGITS_RE = re.compile(r"-?[0-9]+")
+
 _CD_FRAMES_PER_SECOND = 75
 _SECONDS_PER_MINUTE = 60
 _MS_PER_SECOND = 1000
@@ -52,6 +59,13 @@ def _parse_msf(token: str, lineno: int) -> float:
     fields = token.split(":")
     if len(fields) != _MSF_FIELDS:
         raise CueSheetError(f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF)")
+    # int() is more lenient than "base-10 integer" suggests: it accepts PEP
+    # 515 underscores ("0_1"), a leading "+", and non-ASCII decimal digits
+    # (e.g. Arabic-Indic). Require plain ASCII 0-9 before trusting int().
+    if not all(_ASCII_DIGITS_RE.fullmatch(field) for field in fields):
+        raise CueSheetError(
+            f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF, all fields numeric)"
+        )
     try:
         minutes, seconds, frames = (int(field) for field in fields)
     except ValueError:

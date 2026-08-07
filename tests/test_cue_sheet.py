@@ -60,6 +60,21 @@ def test_parse_msf_rejects_oversized_minutes_field_not_overflowerror():
         _parse_msf(token, lineno=1)
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        "0_1:00:00",  # PEP 515 underscore separator
+        "+1:00:00",  # leading plus sign
+        "٠١:٠٠:٠٠",  # Arabic-Indic digits -- int() accepts these too  # noqa: RUF001
+    ],
+)
+def test_parse_msf_rejects_int_leniency_int_would_silently_accept(token):
+    # int() is more permissive than the "base-10 integer" docstring implies;
+    # confirm none of these slip through as a valid timestamp.
+    with pytest.raises(CueSheetError, match="all fields numeric"):
+        _parse_msf(token, lineno=1)
+
+
 MINIMAL_CUE = """\
 REM GENRE Reggae
 REM DATE 1978
