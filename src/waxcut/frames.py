@@ -925,7 +925,7 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
         raise
 
 
-def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
+def split_at(stream: AudioStream, timestamps_ms: Sequence[float]) -> list[bytes]:
     """Split `stream` into segments at the given cut points.
 
     Convenience wrapper around frame_index_at + slice_bytes for the common
@@ -1010,7 +1010,7 @@ def split_to_files(stream: AudioStream, timestamps_ms: Sequence[float], output_p
         path.write_bytes(slice_bytes(stream.data, stream.frames, start, end))
 
 
-def join_frames(segments: list[bytes]) -> bytes:
+def join_frames(segments: Sequence[bytes]) -> bytes:
     """Concatenate frame-aligned MP3 byte segments back into one stream.
 
     b"".join(segments) plus the name: see split_at's docstring for why
