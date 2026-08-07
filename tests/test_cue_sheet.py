@@ -65,6 +65,21 @@ def test_parse_msf_rejects_oversized_minutes_field_not_overflowerror():
         _parse_msf(token, lineno=1)
 
 
+def test_parse_msf_rejects_field_over_int_string_conversion_limit_with_honest_message():
+    # A minutes field longer than sys.get_int_max_str_digits() (default
+    # 4300, since Python 3.11) makes int() itself raise ValueError with its
+    # own "Exceeds the limit... for integer string conversion" message --
+    # distinct from, and longer than, the 400-digit case above (which stays
+    # under the limit and reaches the normal range check). That ValueError
+    # used to be caught by the generic except ValueError and reported as
+    # "all fields numeric", which is misleading: the field is numeric, just
+    # too long.
+    token = "9" * 5000 + ":00:00"
+    with pytest.raises(CueSheetError, match="exceeds") as exc_info:
+        _parse_msf(token, lineno=1)
+    assert "all fields numeric" not in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     "token",
     [

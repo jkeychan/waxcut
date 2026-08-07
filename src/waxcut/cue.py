@@ -9,6 +9,7 @@ examples) -- kept out of this docstring to avoid duplicating it.
 from __future__ import annotations
 
 import re
+import sys
 
 from waxcut.frames import WaxcutError
 
@@ -67,6 +68,17 @@ def _parse_msf(token: str, lineno: int) -> float:
     if not all(_ASCII_DIGITS_RE.fullmatch(field) for field in fields):
         raise CueSheetError(
             f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF, all fields numeric)"
+        )
+    # A field with more digits than int() is willing to convert (default
+    # 4300, since Python 3.11) would otherwise raise its own ValueError,
+    # caught below and misreported as "not numeric" -- checked ahead of
+    # time so a too-long field gets its own, honest message instead. No
+    # legitimate MSF field is anywhere near this long, so nothing valid
+    # is rejected here.
+    int_digit_limit = sys.get_int_max_str_digits()
+    if int_digit_limit and any(len(field.lstrip("-")) > int_digit_limit for field in fields):
+        raise CueSheetError(
+            f"line {lineno}: malformed timestamp {token!r} (a field exceeds {int_digit_limit} digits)"
         )
     try:
         minutes, seconds, frames = (int(field) for field in fields)
