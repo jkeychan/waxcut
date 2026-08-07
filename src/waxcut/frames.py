@@ -594,6 +594,15 @@ _TWELVE_BIT_FIELD_LIMIT = 4096
 def _parse_lame_gapless(data: _RawBytes, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
     """Extract (encoder_delay_samples, encoder_padding_samples) from a LAME extension tag, if present."""
     pos = frame.offset + tag_offset
+    # A VBRI tag has no LAME extension in this layout at all -- the bytes
+    # immediately after it are VBRI's own version/delay/quality fields, not
+    # a Xing-style flags bitmask, so blindly parsing them as one would read
+    # garbage. In practice the b"LAME" magic check a few lines below
+    # rejects it anyway (VBRI's version field is never that), but relying
+    # on an accidental save is fragile -- refuse the VBRI case explicitly
+    # instead. Found by a fresh adversarial code review.
+    if data[pos : pos + 4] == b"VBRI":
+        return None
     # The LAME extension lives inside the same frame as the Xing/Info tag
     # that precedes it, so bound reads by the frame's end as well as the
     # buffer's — same reasoning as _vbr_header_tag_offset. Without this,
@@ -625,14 +634,17 @@ def _parse_lame_gapless(data: _RawBytes, frame: Frame, tag_offset: int) -> tuple
     if not version_string.startswith(b"LAME"):
         return None
 
+    # The 24-byte check above guarantees this slice is always exactly
+    # _LAME_DELAY_PADDING_SIZE (3) bytes, and delay/padding are unpacked
+    # from exactly 12 bits each -- both structurally always in range
+    # [0, _TWELVE_BIT_FIELD_LIMIT), by construction, not by luck (verified
+    # by enumerating the full byte space: max observed value is 4095).
+    # This project's convention is not to guard against scenarios that
+    # can't happen; two defensive checks removed here, found dead by a
+    # fresh adversarial code review.
     delay_padding = data[lame_start + 21 : lame_start + 24]
-    if len(delay_padding) != _LAME_DELAY_PADDING_SIZE:
-        return None
     delay = (delay_padding[0] << 4) | (delay_padding[1] >> 4)
     padding = ((delay_padding[1] & 0x0F) << 8) | delay_padding[2]
-
-    if not (0 <= delay < _TWELVE_BIT_FIELD_LIMIT and 0 <= padding < _TWELVE_BIT_FIELD_LIMIT):
-        return None
     return delay, padding
 
 

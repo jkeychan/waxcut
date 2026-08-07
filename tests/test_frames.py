@@ -576,6 +576,46 @@ def test_vbri_tag_found_at_fixed_offset_for_non_mpeg1_stereo_frame(tmp_path):
     assert stream.frames[0].offset == frame_length
 
 
+def test_vbri_tag_is_never_parsed_as_a_lame_extension(tmp_path):
+    # N4 regression: _parse_lame_gapless didn't check which tag type
+    # tag_offset came from, so a VBRI tag's own version/delay/quality
+    # fields (which have no LAME extension in this layout at all) could
+    # be misread as a Xing-style flags word. An honest VBRI file is saved
+    # from this by the b"LAME" magic check a few lines later (VBRI's
+    # fields are never that by chance) -- but a deliberately crafted VBRI
+    # tag with a genuine "LAME3.100" string placed right where the old
+    # code would look for it after a zero flags word DID parse
+    # successfully, extracting delay/padding from a file that isn't LAME-
+    # encoded (and, per the format, can't be). Found by a fresh
+    # adversarial code review.
+    header = _mpeg1_stereo_128kbps_header(protection_bit=1)  # stereo, no CRC
+    frame_length = 417
+    pad_to_vbri = b"\x00" * (36 - len(header))
+    flags_word = b"\x00\x00\x00\x00"  # VBRI's own version(2)+delay(2), old code read as flags=0
+    version_string = b"LAME3.100"
+    unused = b"\x00" * (21 - len(version_string))
+    delay, padding = 576, 1584
+    delay_padding = bytes(
+        [
+            (delay >> 4) & 0xFF,
+            ((delay & 0xF) << 4) | ((padding >> 8) & 0xF),
+            padding & 0xFF,
+        ]
+    )
+    frame_one = header + pad_to_vbri + b"VBRI" + flags_word + version_string + unused + delay_padding
+    frame_one += b"\x00" * (frame_length - len(frame_one))
+    assert len(frame_one) == frame_length
+
+    frame_two = header + b"\x00" * (frame_length - len(header))
+
+    synthetic_mp3 = tmp_path / "vbri_fake_lame.mp3"
+    synthetic_mp3.write_bytes(frame_one + frame_two)
+
+    stream = waxcut.load_audio_stream(synthetic_mp3)
+    assert stream.encoder_delay_samples == 0
+    assert stream.encoder_padding_samples == 0
+
+
 def test_load_audio_stream_accepts_a_str_path(fixture_path):
     # load_audio_stream called path.stat()/path.open() directly, so a str
     # argument raised a raw, undocumented AttributeError instead of the
