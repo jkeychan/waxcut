@@ -23,7 +23,9 @@ class CueSheetError(ValueError):
     Covers malformed MM:SS:FF timestamps, a TRACK with no INDEX 01, cue
     text with no audio tracks at all, out-of-order INDEX 01 timestamps,
     and multi-FILE cue sheets (unsupported -- see the parse_cue_sheet
-    docstring). Always raised with a message naming the offending line.
+    docstring). Always raised with a message naming the offending line,
+    except the no-audio-tracks-found case: with nothing found in the
+    whole text, there's no single offending line to name.
     """
 
 
@@ -142,12 +144,12 @@ def parse_cue_sheet(text: str) -> list[float]:
     seen_file = False
     in_audio_track = False
     current_track_number = "?"
+    current_track_lineno = 0
     have_index01_for_current_track = False
-    lineno = 0
 
-    def _check_track_closed(lineno: int) -> None:
+    def _check_track_closed() -> None:
         if in_audio_track and not have_index01_for_current_track:
-            raise CueSheetError(f"line {lineno}: TRACK {current_track_number} has no INDEX 01")
+            raise CueSheetError(f"line {current_track_lineno}: TRACK {current_track_number} has no INDEX 01")
 
     for lineno, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
@@ -165,8 +167,9 @@ def parse_cue_sheet(text: str) -> list[float]:
                 raise CueSheetError(f"line {lineno}: multi-FILE cue sheets are not supported")
             seen_file = True
         elif keyword == "TRACK":
-            _check_track_closed(lineno)
+            _check_track_closed()
             current_track_number, in_audio_track = _handle_track_line(line)
+            current_track_lineno = lineno
             have_index01_for_current_track = False
         elif keyword == "INDEX" and in_audio_track:
             ms = _handle_index_line(line, lineno)
@@ -182,7 +185,7 @@ def parse_cue_sheet(text: str) -> list[float]:
         # PREGAP/POSTGAP, and INDEX lines outside an AUDIO track, or with
         # an index number other than 01 -- all intentionally ignored.
 
-    _check_track_closed(lineno=lineno)
+    _check_track_closed()
 
     if not timestamps:
         raise CueSheetError("no audio TRACK/INDEX 01 entries found in cue sheet text")

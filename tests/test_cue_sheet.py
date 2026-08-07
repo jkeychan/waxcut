@@ -203,6 +203,33 @@ def test_parse_cue_sheet_rejects_track_missing_index_01():
         waxcut.parse_cue_sheet(text)
 
 
+def test_parse_cue_sheet_missing_index_01_error_names_track_line_not_closing_line():
+    # The broken track is TRACK 02 on line 4 -- no INDEX 01 before TRACK 03
+    # opens on line 8. The error must point at line 4 (where TRACK 02 was
+    # declared), not line 8 (where its block happens to end).
+    text = (
+        'FILE "x.mp3" MP3\n'
+        "TRACK 01 AUDIO\n"
+        "INDEX 01 00:00:00\n"
+        "TRACK 02 AUDIO\n"
+        "REM x\n"
+        "REM y\n"
+        "REM z\n"
+        "TRACK 03 AUDIO\n"
+        "INDEX 01 00:05:00\n"
+    )
+    with pytest.raises(waxcut.CueSheetError, match=r"^line 4: TRACK 02 has no INDEX 01$"):
+        waxcut.parse_cue_sheet(text)
+
+
+def test_parse_cue_sheet_no_audio_tracks_found_has_no_line_number():
+    # No single line is "the" offending one when nothing was found at all --
+    # see the CueSheetError docstring's explicit carve-out for this case.
+    with pytest.raises(waxcut.CueSheetError, match="no audio TRACK/INDEX 01") as exc_info:
+        waxcut.parse_cue_sheet("this is not a cue sheet at all\njust some text\n")
+    assert "line " not in str(exc_info.value)
+
+
 def test_parse_cue_sheet_rejects_oversized_minutes_field():
     # Full-pipeline version of the reviewer's crash reproduction: this used
     # to raise an uncaught OverflowError instead of CueSheetError.
