@@ -327,7 +327,10 @@ def id3v2_size(data: bytes | mmap.mmap) -> int:
     return _ID3V2_HEADER_SIZE + size
 
 
-_ID3V2_TAG_VERSION = b"\x03\x00"  # ID3v2.3.0 -- see plan doc for why not 2.4
+_ID3V2_TAG_VERSION = b"\x03\x00"  # ID3v2.3.0: far more widely supported by
+# real-world players/tools than 2.4, and this module's format choices
+# (plain big-endian frame sizes in _text_frame, no UTF-8 in _encode_text)
+# are 2.3-specific -- writing a 2.4 tag would need different framing.
 _LATIN1_ENCODING_BYTE = b"\x00"
 _UTF16_ENCODING_BYTE = b"\x01"
 _UTF16_LE_BOM = b"\xff\xfe"

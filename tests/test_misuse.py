@@ -276,8 +276,10 @@ def test_write_id3v2_tag_rejects_data_with_a_pre_existing_id3v2_tag():
 
 def test_write_id3v2_tag_accepts_memoryview_input():
     # slice_bytes always returns real bytes today, but write_id3v2_tag
-    # coerces via bytes(data) defensively -- see the plan doc's
-    # Compatibility section (issue #28, streaming/mmap support) for why.
+    # coerces via bytes(data) defensively so a memoryview or other
+    # bytes-like object is also accepted -- forward compatibility with
+    # streaming/mmap-backed output (tracked as issue #28), not something
+    # any current caller needs.
     tagged = waxcut.write_id3v2_tag(memoryview(b"payload"), title="T")
     assert tagged.endswith(b"payload")
     assert isinstance(tagged, bytes)
