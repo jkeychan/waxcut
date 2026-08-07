@@ -131,6 +131,13 @@ def parse_cue_sheet(text: str) -> list[float]:
             timestamps are allowed -- split_at already documents that a
             duplicate timestamp simply yields an empty segment).
     """
+    # A leading BOM survives decoding when a caller uses "utf-8" instead of
+    # "utf-8-sig" -- common with real-world .cue files from EAC and other
+    # rippers. Strip it so it can't defeat the FILE/TRACK keyword dispatch
+    # below (a BOM'd first line would otherwise fail the FILE/TRACK match
+    # entirely and silently drop that line's data).
+    text = text.removeprefix("﻿")
+
     timestamps: list[float] = []
     seen_file = False
     in_audio_track = False
@@ -146,17 +153,22 @@ def parse_cue_sheet(text: str) -> list[float]:
         line = raw_line.strip()
         if not line:
             continue
-        upper = line.upper()
+        # Compare the first whitespace-delimited token rather than prefix-
+        # matching a literal space after the keyword: str.split() collapses
+        # tabs, NBSP, and other whitespace runs for free, so a line like
+        # "TRACK\t01\tAUDIO" is recognized instead of silently falling
+        # through as an unrecognized line.
+        keyword = line.split()[0].upper()
 
-        if upper.startswith("FILE "):
+        if keyword == "FILE":
             if seen_file:
                 raise CueSheetError(f"line {lineno}: multi-FILE cue sheets are not supported")
             seen_file = True
-        elif upper.startswith("TRACK "):
+        elif keyword == "TRACK":
             _check_track_closed(lineno)
             current_track_number, in_audio_track = _handle_track_line(line)
             have_index01_for_current_track = False
-        elif upper.startswith("INDEX ") and in_audio_track:
+        elif keyword == "INDEX" and in_audio_track:
             ms = _handle_index_line(line, lineno)
             if ms is not None:
                 if timestamps and ms < timestamps[-1]:

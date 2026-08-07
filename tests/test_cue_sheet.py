@@ -239,6 +239,34 @@ def test_parse_cue_sheet_is_case_insensitive_on_keywords():
     assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
 
 
+def test_parse_cue_sheet_recognizes_tab_delimited_keywords():
+    # The outer keyword dispatch used to prefix-match a literal space after
+    # TRACK/FILE/INDEX, so a tab-delimited line like "TRACK\t01\tAUDIO" never
+    # reached the TRACK-handling branch at all -- silently falling through
+    # as an unrecognized line rather than an error.
+    text = 'FILE\t"x.mp3"\tMP3\n\tTRACK\t01\tAUDIO\n\t\tINDEX\t01\t00:05:00\n'
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
+
+
+def test_parse_cue_sheet_recognizes_nbsp_delimited_keywords():
+    # Same class of bug as the tab case, via a non-breaking space (U+00A0)
+    # after the keyword instead of a regular space.
+    text = 'FILE\xa0"x.mp3"\xa0MP3\n  TRACK\xa001\xa0AUDIO\n    INDEX\xa001\xa000:05:00\n'
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
+
+
+def test_parse_cue_sheet_strips_leading_bom():
+    # A caller decoding with "utf-8" instead of "utf-8-sig" retains a
+    # leading BOM -- common with real-world .cue files from EAC and other
+    # rippers. A BOM'd leading TRACK line used to fail the keyword match
+    # entirely: the line was silently treated as unrecognized, so track 1
+    # never entered in_audio_track state and its (deliberately nonzero, to
+    # rule out the leading-zero-drop rule) INDEX 01 silently vanished from
+    # the output instead of appearing before track 2's.
+    text = "﻿TRACK 01 AUDIO\n  INDEX 01 00:02:00\nTRACK 02 AUDIO\n  INDEX 01 00:05:00\n"
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([2000.0, 5000.0])
+
+
 def test_parse_cue_sheet_output_feeds_split_at():
     # Integration smoke test: the real thing this feature exists for.
     # Uses an existing MP3 fixture with cut points that comfortably fit
