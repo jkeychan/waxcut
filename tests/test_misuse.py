@@ -96,6 +96,18 @@ def test_frames_every_reversed_slice_form_matches_the_equivalent_list_slice(fixt
     assert len(frames[5:2].rebase(10.0)) == 0
 
 
+def test_frames_stepped_slice_raises_type_error_not_value_error(fixture_path):
+    # A non-1 step isn't a bad *value* (which would be ValueError) -- it's
+    # an operation this array-backed view doesn't support at all, which is
+    # what TypeError signals for most Python sequences.
+    frames = waxcut.load_audio_stream(fixture_path).frames
+    assert len(frames) > 5
+    with pytest.raises(TypeError):
+        frames[::2]
+    with pytest.raises(TypeError):
+        frames[0:5:2]
+
+
 def test_frames_forward_slicing_still_matches_list_semantics(fixture_path):
     # _view is shared by every slice, so the reversed-range clamp must not
     # disturb ordinary forward slicing, including negative and out-of-range

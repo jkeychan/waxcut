@@ -198,7 +198,10 @@ class Frames(Sequence["Frame"]):
     object or boxed int/float is allocated until you actually index into
     it. Supports the same operations a list[Frame] does: len(), positive
     and negative indexing, slicing (returns another Frames, sharing the
-    same backing arrays -- slicing never copies), and iteration.
+    same backing arrays -- slicing never copies), and iteration. Stepped
+    slicing (e.g. frames[::2]) is not supported and raises TypeError --
+    real step support for this array-backed view is nontrivial and not
+    needed by any caller in this codebase.
 
     Not constructed directly by callers -- returned by scan_frames and
     found on AudioStream.frames.
@@ -253,7 +256,7 @@ class Frames(Sequence["Frame"]):
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
             if step != 1:
-                raise ValueError("Frames slicing does not support a step")
+                raise TypeError("Frames slicing does not support a step")
             return Frames._view(self, self._start + start, self._start + stop, self._start_ms_bias)
         if index < 0:
             index += len(self)
