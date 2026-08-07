@@ -206,12 +206,15 @@ _REGRESSION_FILES = sorted(REGRESSION_FIXTURES.glob("*.bin"))
 # An empty glob here used to silently parametrize to zero cases, which
 # pytest reports as a skip rather than a failure -- so a corpus that
 # regressed to empty (e.g. a bad merge) would go unnoticed forever instead
-# of failing the suite. Asserting here, at collection time, turns that into
-# a loud collection error instead.
-assert _REGRESSION_FILES, (
-    f"No .bin fixtures found under {REGRESSION_FIXTURES} -- the regression corpus must not be "
-    "empty (see its README for what belongs here and why)."
-)
+# of failing the suite. Checking here, at collection time, turns that into
+# a loud collection error instead. A plain `assert` would be stripped
+# under Python's -O flag, silently reverting to that exact bug, so this
+# raises explicitly instead.
+if not _REGRESSION_FILES:
+    raise RuntimeError(
+        f"No .bin fixtures found under {REGRESSION_FIXTURES} -- the regression corpus must not be "
+        "empty (see its README for what belongs here and why)."
+    )
 
 # A sentinel meaning "this call is expected to succeed, not raise" -- as
 # opposed to a dict value of an actual exception type below.
