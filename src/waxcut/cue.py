@@ -14,10 +14,27 @@ import sys
 
 from waxcut.frames import WaxcutError
 
-# Optional leading "-" is allowed through so a negative minutes field still
-# reaches the dedicated "invalid minutes field" range check below instead of
-# being misreported as non-numeric.
+# Optional leading "-" is allowed through for all three MM:SS:FF fields (not
+# just minutes -- despite this constant's name, the regex doesn't single
+# minutes out), so a negative value in any of them reaches that field's own
+# dedicated range check below (invalid minutes / seconds must be 0-59 /
+# frame field must be 0-74) instead of being misreported as non-numeric.
 _ASCII_DIGITS_RE = re.compile(r"-?[0-9]+")
+
+# Error messages used to interpolate the raw, attacker-controlled token
+# verbatim (repr'd) -- unbounded, so a pathologically long field produced a
+# message just as long (it's rejected on its own merits too, but only after
+# a message that size has already been built). Used in every message below
+# that would otherwise show the raw token. Found by a fresh adversarial code
+# review.
+_MAX_TOKEN_CHARS_IN_MESSAGE = 60
+
+
+def _truncated_repr(token: str) -> str:
+    if len(token) <= _MAX_TOKEN_CHARS_IN_MESSAGE:
+        return repr(token)
+    return f"{token[:_MAX_TOKEN_CHARS_IN_MESSAGE]!r}...({len(token)} chars total)"
+
 
 _CD_FRAMES_PER_SECOND = 75
 _SECONDS_PER_MINUTE = 60
@@ -60,15 +77,16 @@ def _parse_msf(token: str, lineno: int) -> float:
             exceeds `_MAX_MINUTES_FIELD`, seconds is outside 0-59, or
             the frame field is outside 0-74.
     """
+    token_repr = _truncated_repr(token)
     fields = token.split(":")
     if len(fields) != _MSF_FIELDS:
-        raise CueSheetError(f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF)")
+        raise CueSheetError(f"line {lineno}: malformed timestamp {token_repr} (expected MM:SS:FF)")
     # int() is more lenient than "base-10 integer" suggests: it accepts PEP
     # 515 underscores ("0_1"), a leading "+", and non-ASCII decimal digits
     # (e.g. Arabic-Indic). Require plain ASCII 0-9 before trusting int().
     if not all(_ASCII_DIGITS_RE.fullmatch(field) for field in fields):
         raise CueSheetError(
-            f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF, all fields numeric)"
+            f"line {lineno}: malformed timestamp {token_repr} (expected MM:SS:FF, all fields numeric)"
         )
     # A field with more digits than int() is willing to convert (default
     # 4300, since Python 3.11) would otherwise raise its own ValueError,
@@ -79,30 +97,30 @@ def _parse_msf(token: str, lineno: int) -> float:
     int_digit_limit = sys.get_int_max_str_digits()
     if int_digit_limit and any(len(field.lstrip("-")) > int_digit_limit for field in fields):
         raise CueSheetError(
-            f"line {lineno}: malformed timestamp {token!r} (a field exceeds {int_digit_limit} digits)"
+            f"line {lineno}: malformed timestamp {token_repr} (a field exceeds {int_digit_limit} digits)"
         )
     try:
         minutes, seconds, frames = (int(field) for field in fields)
     except ValueError:
         raise CueSheetError(
-            f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF, all fields numeric)"
+            f"line {lineno}: malformed timestamp {token_repr} (expected MM:SS:FF, all fields numeric)"
         ) from None
     if not (0 <= minutes <= _MAX_MINUTES_FIELD):
         raise CueSheetError(
-            f"line {lineno}: {token!r} has an invalid minutes field (must be 0-{_MAX_MINUTES_FIELD})"
+            f"line {lineno}: {token_repr} has an invalid minutes field (must be 0-{_MAX_MINUTES_FIELD})"
         )
     if not (0 <= seconds < _MAX_SECONDS_FIELD):
-        raise CueSheetError(f"line {lineno}: {token!r} out of range (seconds must be 0-59)")
+        raise CueSheetError(f"line {lineno}: {token_repr} out of range (seconds must be 0-59)")
     if not (0 <= frames < _MAX_FRAME_FIELD):
         raise CueSheetError(
-            f"line {lineno}: {token!r} out of range (frame field must be 0-74 at 75 frames/sec)"
+            f"line {lineno}: {token_repr} out of range (frame field must be 0-74 at 75 frames/sec)"
         )
     total_seconds = minutes * _SECONDS_PER_MINUTE + seconds
     return total_seconds * _MS_PER_SECOND + frames * _MS_PER_SECOND / _CD_FRAMES_PER_SECOND
 
 
 _AUDIO_TRACK_TYPE = "AUDIO"
-_TARGET_INDEX_NUMBER = "01"
+_TARGET_INDEX_NUMBER = 1
 _TRACK_LINE_MIN_FIELDS = 3  # TRACK <number> <type>
 _INDEX_LINE_MIN_FIELDS = 3  # INDEX <number> <MM:SS:FF>
 
@@ -118,7 +136,20 @@ def _handle_track_line(line: str) -> tuple[str, bool]:
 def _handle_index_line(line: str, lineno: int) -> float | None:
     """Parse an INDEX line; return its ms value if it's INDEX 01, else None."""
     parts = line.split()
-    if len(parts) < _INDEX_LINE_MIN_FIELDS or parts[1] != _TARGET_INDEX_NUMBER:
+    if len(parts) < _INDEX_LINE_MIN_FIELDS:
+        return None
+    # Compare numerically, not as an exact "01" string match: real-world
+    # cue sheets from tools like cdrdao and hand-written sheets emit
+    # unpadded index numbers ("INDEX 1"), and rejecting those as "not
+    # INDEX 01" silently dropped the cut point instead of recognizing it.
+    # A non-numeric index number (malformed input) just means this isn't
+    # the target index either -- same as any other non-match. Found by a
+    # fresh adversarial code review.
+    try:
+        index_number = int(parts[1])
+    except ValueError:
+        return None
+    if index_number != _TARGET_INDEX_NUMBER:
         return None
     return _parse_msf(parts[2], lineno)
 
@@ -167,8 +198,14 @@ def parse_cue_sheet(text: str) -> list[float]:
     # "utf-8-sig" -- common with real-world .cue files from EAC and other
     # rippers. Strip it so it can't defeat the FILE/TRACK keyword dispatch
     # below (a BOM'd first line would otherwise fail the FILE/TRACK match
-    # entirely and silently drop that line's data).
-    text = text.removeprefix("﻿")
+    # entirely and silently drop that line's data). Looped, not a single
+    # removeprefix() call: a real artifact of tools that decode with
+    # "utf-8" and re-encode with "utf-8-sig" is a double BOM, which a
+    # single strip leaves one copy of -- still enough to defeat the
+    # dispatch below, just as effectively as the first. Found by a fresh
+    # adversarial code review.
+    while text.startswith("﻿"):
+        text = text.removeprefix("﻿")
 
     timestamps: list[float] = []
     seen_file = False
@@ -181,7 +218,15 @@ def parse_cue_sheet(text: str) -> list[float]:
         if in_audio_track and not have_index01_for_current_track:
             raise CueSheetError(f"line {current_track_lineno}: TRACK {current_track_number} has no INDEX 01")
 
-    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+    # split("\n"), not splitlines(): splitlines() also breaks on a wider
+    # set of Unicode line-separator characters (\x0b, \x0c, \x1c-\x1e,
+    # U+0085, U+2028, U+2029, ...) that can legitimately appear inside a
+    # field's text on this line-oriented, ASCII-ish format -- e.g. a
+    # keyword line with a stray \x0b splitting into two lines and getting
+    # silently misrecognized. \r\n is still handled correctly: the
+    # trailing \r left on each line is whitespace, stripped by line.strip()
+    # a few lines below. Found by a fresh adversarial code review.
+    for lineno, raw_line in enumerate(text.split("\n"), start=1):
         line = raw_line.strip()
         if not line:
             continue

@@ -345,6 +345,54 @@ def test_parse_cue_sheet_strips_leading_bom():
     assert waxcut.parse_cue_sheet(text) == pytest.approx([2000.0, 5000.0])
 
 
+def test_parse_cue_sheet_strips_a_double_bom():
+    # N12 regression: a real artifact of tools that decode with "utf-8"
+    # (leaving one BOM) and then re-encode with "utf-8-sig" (adding a
+    # second) is a double-BOM file. A single removeprefix() call left one
+    # BOM behind -- still enough to defeat the FILE/TRACK keyword match,
+    # just as effectively as before the fix. Found by a fresh adversarial
+    # code review.
+    text = "﻿﻿TRACK 01 AUDIO\n  INDEX 01 00:02:00\nTRACK 02 AUDIO\n  INDEX 01 00:05:00\n"
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([2000.0, 5000.0])
+
+
+def test_parse_cue_sheet_recognizes_unpadded_index_number():
+    # N13 regression: real-world cue sheets from tools like cdrdao (and
+    # hand-written ones) sometimes emit "INDEX 1" rather than "INDEX 01".
+    # An exact string match against "01" silently dropped the cut point
+    # instead of recognizing it -- no error, just a missing track split.
+    # Found by a fresh adversarial code review.
+    text = 'FILE "x.mp3" MP3\n  TRACK 01 AUDIO\n    INDEX 1 00:05:00\n'
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
+
+
+def test_parse_cue_sheet_error_messages_truncate_long_tokens():
+    # N1 regression: error messages interpolated the raw, attacker-
+    # controlled token verbatim and unbounded -- a pathologically long
+    # malformed field produced a message just as long. Found by a fresh
+    # adversarial code review.
+    huge_token = "9" * 10_000
+    text = f'FILE "x.mp3" MP3\n  TRACK 01 AUDIO\n    INDEX 01 {huge_token}\n'
+    with pytest.raises(waxcut.CueSheetError) as exc_info:
+        waxcut.parse_cue_sheet(text)
+    assert len(str(exc_info.value)) < 500
+
+
+def test_parse_cue_sheet_does_not_split_on_non_newline_unicode_line_separators():
+    # N15 regression: splitlines() also breaks on a wider set of Unicode
+    # line-separator characters (here, \x0b, vertical tab) than just "\n".
+    # Pre-fix, "INDEX\x0b01 00:05:00" split into two lines ("INDEX" and
+    # "01 00:05:00"): neither has "INDEX" as its own keyword with enough
+    # fields, so the INDEX 01 was never recognized and the track was
+    # rejected as having no INDEX 01 at all -- a whitespace character
+    # inside one line silently broke parsing of a line that, tokenized by
+    # str.split() alone (which does treat \x0b as a separator, same as
+    # any other whitespace), is perfectly well-formed. Found by a fresh
+    # adversarial code review.
+    text = 'FILE "x.mp3" MP3\n  TRACK 01 AUDIO\n    INDEX\x0b01 00:05:00\n'
+    assert waxcut.parse_cue_sheet(text) == pytest.approx([5000.0])
+
+
 def test_parse_cue_sheet_output_feeds_split_at():
     # Integration smoke test: the real thing this feature exists for.
     # Uses an existing MP3 fixture with cut points that comfortably fit
