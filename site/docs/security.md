@@ -26,7 +26,7 @@ in the repository for the current policy.
 ## Continuous fuzzing
 
 The frame parser is fuzzed continuously with
-[ClusterFuzzLite](https://github.com/jkeychan/waxcut/blob/main/.clusterfuzzlite/),
+[ClusterFuzzLite](https://github.com/jkeychan/waxcut/tree/main/.clusterfuzzlite/),
 via the
 [`cflite_pr.yml`](https://github.com/jkeychan/waxcut/actions/workflows/cflite_pr.yml)
 workflow. Every pull request is fuzzed against `scan_frames` — the only
