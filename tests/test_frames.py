@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import itertools
 import mmap
 import shutil
@@ -10,12 +11,14 @@ import pytest
 from mutagen.mp3 import MP3
 
 import waxcut
+from waxcut import Frames
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE_NAMES = [
     "cbr_stereo.mp3",
     "cbr_mono.mp3",
     "vbr_stereo.mp3",
+    "lavc_vbr_stereo.mp3",
     "lame_vbr_stereo.mp3",
     "mono_8khz.mp3",
     "joint_stereo_vbr.mp3",
@@ -92,6 +95,55 @@ def test_id3v2_size_with_tag():
     assert waxcut.id3v2_size(header + b"12345" + b"rest") == 15
 
 
+def test_id3v2_size_includes_footer_when_flag_set():
+    # Flags byte 0x10 (bit 4, ID3v2.4-only) means a 10-byte footer mirrors
+    # the header at the end of the tag -- its length isn't part of the
+    # syncsafe size field and must be added on top of it. Buffer must be
+    # long enough to actually hold the declared tag+footer (25 bytes) plus
+    # some real trailing content, or the N2 len(data) clamp below would
+    # mask this assertion instead of exercising the footer math.
+    header = b"ID3\x04\x00\x10\x00\x00\x00\x05"
+    body_and_footer = b"12345" + b"\x00" * 10  # 5-byte body + 10-byte footer
+    assert waxcut.id3v2_size(header + body_and_footer + b"rest") == 25
+
+
+def test_id3v2_size_clamps_a_declared_size_larger_than_the_buffer():
+    # N2 regression: a crafted or corrupted 4-byte syncsafe size field can
+    # claim far more than the buffer actually holds -- unclamped, callers
+    # like scan_frames start their scan past EOF and report no audio found
+    # at all in a file that may have perfectly good frames right after a
+    # merely mis-sized tag. Found by a fresh adversarial code review.
+    huge_size = (0x7F << 21) | (0x7F << 14) | (0x7F << 7) | 0x7F  # max syncsafe value
+    header = b"ID3\x03\x00\x00" + bytes([(huge_size >> s) & 0x7F for s in (21, 14, 7, 0)])
+    data = header + b"only 5 bytes"
+    assert waxcut.id3v2_size(data) == len(data)
+
+
+def test_id3v2_size_ignores_footer_flag_bit_on_pre_v2_4_tags():
+    # I6 regression: bit 0x10 is ID3v2.4-only -- it's reserved (must be
+    # zero) in v2.2/v2.3, so a v2.3 tag with that bit set anyway (major
+    # version byte 0x03, not 0x04) must not have 10 bytes skipped that
+    # were never actually written. Found by a fresh adversarial code
+    # review: the version byte (data[3]) was never checked, so this
+    # produced an offset 10 bytes short of the real first audio frame for
+    # any tag setting that reserved bit.
+    header = b"ID3\x03\x00\x10\x00\x00\x00\x05"
+    assert waxcut.id3v2_size(header + b"12345" + b"rest") == 15
+
+
+def test_frames_is_importable_from_top_level_waxcut():
+    assert waxcut.Frames is Frames
+
+
+def test_frames_repr_is_useful_not_the_default_object_repr(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    assert repr(stream.frames) == f"<Frames: {len(stream.frames)} frame(s)>"
+
+
+def test_unsupported_mp3_error_is_a_waxcut_error():
+    assert issubclass(waxcut.UnsupportedMp3Error, waxcut.WaxcutError)
+
+
 def test_unsupported_file_raises():
     with pytest.raises(waxcut.UnsupportedMp3Error):
         waxcut.scan_frames(b"this is not an mp3 file at all")
@@ -103,27 +155,154 @@ def test_frame_index_at_clamps_to_range(fixture_path):
     assert waxcut.frame_index_at(stream.frames, 10**9) == len(stream.frames) - 1
 
 
+def test_audio_stream_equality_and_hash_are_identity_based(fixture_path):
+    # AudioStream is frozen but must not have content-based equality: two
+    # AudioStreams sharing the very same underlying data/frames objects
+    # still must not compare equal. Two independent load_audio_stream()
+    # calls already differ (their `frames` field differs by identity, since
+    # Frames has no __eq__ of its own) even under the old field-wise
+    # dataclass eq, so that alone wouldn't catch a regression back to
+    # eq=True -- sharing the same data/frames objects here is what actually
+    # exercises the fix.
+    stream1 = waxcut.load_audio_stream(fixture_path)
+    stream2 = waxcut.AudioStream(
+        stream1.data,
+        stream1.frames,
+        stream1.encoder_delay_samples,
+        stream1.encoder_padding_samples,
+        stream1.sample_rate,
+    )
+    assert stream1 != stream2
+    assert hash(stream1) != hash(stream2)
+
+
 def test_ffmpeg_native_encoder_does_not_produce_false_gapless_values():
-    # cbr_stereo.mp3/cbr_mono.mp3 are encoded with ffmpeg's native "Lavc..."
-    # tagged encoder, not real LAME — regression test for misreading that
-    # tag's bytes as if they were LAME's gapless delay/padding fields.
-    for name in ("cbr_stereo.mp3", "cbr_mono.mp3"):
+    # cbr_stereo.mp3/cbr_mono.mp3/lavc_vbr_stereo.mp3 are encoded with
+    # ffmpeg's native "Lavc..." tagged encoder, not real LAME — regression
+    # test for misreading that tag's bytes as if they were LAME's gapless
+    # delay/padding fields.
+    for name in ("cbr_stereo.mp3", "cbr_mono.mp3", "lavc_vbr_stereo.mp3"):
         stream = waxcut.load_audio_stream(FIXTURES / name)
         assert stream.encoder_delay_samples == 0
         assert stream.encoder_padding_samples == 0
 
 
+def test_real_lame_encode_reports_known_gapless_delay_and_padding():
+    # lame_vbr_stereo.mp3 is a genuine `lame --vbr-new -q 4` encode (LAME
+    # 3.100) of a 2-second sine wave -- unlike every synthetic-header test
+    # above, its bytes are exactly what a real encoder wrote, not a
+    # hand-crafted layout. 576 is a widely-documented LAME constant (its
+    # MDCT filter's fixed encoder delay, independent of quality/bitrate
+    # settings); the padding value below was read back from this specific
+    # file's own bytes (not assumed) via load_audio_stream and cross-
+    # checked against mutagen's independently-computed duration, which
+    # matches the source's true 2000ms length almost exactly once this
+    # delay+padding is trimmed -- see test_duration_matches_mutagen.
+    stream = waxcut.load_audio_stream(FIXTURES / "lame_vbr_stereo.mp3")
+    assert stream.encoder_delay_samples == 576
+    assert stream.encoder_padding_samples == 1080
+
+
+def test_playable_duration_ms_trims_gapless_delay_and_padding():
+    # None of the real fixtures have nonzero delay/padding, so replacing
+    # playable_duration_ms's body with `return self.duration_ms` still
+    # passes every other test in this file -- this needs synthetic values.
+    # dataclasses.replace() on a real load_audio_stream() result keeps
+    # everything else (frames, data, sample_rate) genuine and overrides
+    # only the two gapless fields under test.
+    stream = waxcut.load_audio_stream(FIXTURES / "cbr_stereo.mp3")
+    delay, padding = 1000, 1000
+    trimmed = dataclasses.replace(stream, encoder_delay_samples=delay, encoder_padding_samples=padding)
+
+    expected_trim_ms = (delay + padding) / stream.sample_rate * 1000
+    assert expected_trim_ms < stream.duration_ms  # sanity check: not exercising the clamp here
+    assert trimmed.playable_duration_ms == pytest.approx(stream.duration_ms - expected_trim_ms)
+
+
+def test_playable_duration_ms_clamps_to_zero_when_trim_exceeds_duration():
+    # A delay this large is impossible from a real LAME tag (its gapless
+    # fields are 12-bit, max 4095 -- see _TWELVE_BIT_FIELD_LIMIT), but
+    # AudioStream itself enforces no such range on these two fields (only
+    # _parse_lame_gapless does, at read time) -- so trim_ms can exceed
+    # duration_ms here, which is exactly the case max(0.0, ...) guards.
+    stream = waxcut.load_audio_stream(FIXTURES / "cbr_stereo.mp3")
+    huge_delay = 10_000_000
+    trimmed = dataclasses.replace(stream, encoder_delay_samples=huge_delay, encoder_padding_samples=0)
+
+    trim_ms = huge_delay / stream.sample_rate * 1000
+    assert trim_ms > stream.duration_ms  # sanity check: this really does exceed duration_ms unclamped
+    assert trimmed.playable_duration_ms == 0.0
+
+
 REGRESSION_FIXTURES = Path(__file__).parent / "fixtures" / "regression"
+_REGRESSION_FILES = sorted(REGRESSION_FIXTURES.glob("*.bin"))
+# An empty glob here used to silently parametrize to zero cases, which
+# pytest reports as a skip rather than a failure -- so a corpus that
+# regressed to empty (e.g. a bad merge) would go unnoticed forever instead
+# of failing the suite. Checking here, at collection time, turns that into
+# a loud collection error instead. A plain `assert` would be stripped
+# under Python's -O flag, silently reverting to that exact bug, so this
+# raises explicitly instead.
+if not _REGRESSION_FILES:
+    raise RuntimeError(
+        f"No .bin fixtures found under {REGRESSION_FIXTURES} -- the regression corpus must not be "
+        "empty (see its README for what belongs here and why)."
+    )
 
+# A sentinel meaning "this call is expected to succeed, not raise" -- as
+# opposed to a dict value of an actual exception type below.
+_SUCCEEDS = object()
 
-@pytest.mark.parametrize(
-    "regression_file",
-    sorted(REGRESSION_FIXTURES.glob("*.bin")) if REGRESSION_FIXTURES.exists() else [],
-    ids=lambda p: p.name,
+# Per-fixture expected outcome at each API layer, where known -- see
+# tests/fixtures/regression/README.md for what each targets and why.
+# scan_frames alone never touches Xing/VBR-header parsing (that only
+# happens in load_audio_stream), so a fixture can legitimately succeed at
+# the scan_frames layer and only raise once load_audio_stream inspects the
+# VBR header frame -- that's why the two dicts differ.
+_SCAN_FRAMES_EXPECTATIONS: dict[str, type[Exception] | object] = {
+    "truncated_id3v2_tag.bin": waxcut.UnsupportedMp3Error,
+    "truncated_vbr_flags_word.bin": _SUCCEEDS,
+    "vbr_header_only_no_audio.bin": _SUCCEEDS,
+    "frame_length_past_eof.bin": waxcut.UnsupportedMp3Error,
+    "adversarial_0xff_no_sync.bin": waxcut.UnsupportedMp3Error,
+}
+_LOAD_AUDIO_STREAM_EXPECTATIONS: dict[str, type[Exception] | object] = dict.fromkeys(
+    _SCAN_FRAMES_EXPECTATIONS, waxcut.UnsupportedMp3Error
 )
-def test_regression_corpus_does_not_crash(regression_file):
-    with contextlib.suppress(waxcut.UnsupportedMp3Error):
-        waxcut.scan_frames(regression_file.read_bytes())
+
+
+def _assert_matches_expectation(call, expected):
+    if expected is _SUCCEEDS:
+        call()
+    elif expected is None:
+        # No specific claim for this fixture -- the smoke-test minimum:
+        # parsing it must raise nothing but UnsupportedMp3Error (which
+        # FileTooLargeError, also acceptable, is itself a subclass of).
+        with contextlib.suppress(waxcut.UnsupportedMp3Error):
+            call()
+    else:
+        with pytest.raises(expected):
+            call()
+
+
+@pytest.mark.parametrize("regression_file", _REGRESSION_FILES, ids=lambda p: p.name)
+def test_regression_corpus_does_not_crash(regression_file, tmp_path):
+    data = regression_file.read_bytes()
+    _assert_matches_expectation(
+        lambda: waxcut.scan_frames(data),
+        _SCAN_FRAMES_EXPECTATIONS.get(regression_file.name),
+    )
+
+    # Also run every fixture through load_audio_stream, the same on-disk
+    # entry point a real caller would use -- several fixtures here only
+    # exercise their target code path there (VBR-header/gapless-tag
+    # parsing), not in scan_frames alone.
+    copied = tmp_path / regression_file.name
+    copied.write_bytes(data)
+    _assert_matches_expectation(
+        lambda: waxcut.load_audio_stream(copied),
+        _LOAD_AUDIO_STREAM_EXPECTATIONS.get(regression_file.name),
+    )
 
 
 def test_split_at_matches_manual_frame_index_at_and_slice_bytes(fixture_path):
@@ -217,6 +396,27 @@ def test_join_frames_reverses_split_at(fixture_path):
 
 def test_join_frames_empty_list_returns_empty_bytes():
     assert waxcut.join_frames([]) == b""
+
+
+def test_split_to_files_matches_split_at_segment_boundaries(fixture_path, tmp_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    duration = stream.playable_duration_ms
+    timestamps = [duration * 0.25, duration * 0.6]
+    expected = waxcut.split_at(stream, timestamps)
+
+    output_paths = [tmp_path / f"segment{i}.mp3" for i in range(len(expected))]
+    waxcut.split_to_files(stream, timestamps, output_paths)
+
+    written = [path.read_bytes() for path in output_paths]
+    assert written == expected
+    assert waxcut.join_frames(written) == waxcut.join_frames(waxcut.split_at(stream, timestamps))
+
+
+def test_split_to_files_rejects_mismatched_output_path_count(fixture_path, tmp_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    duration = stream.playable_duration_ms
+    with pytest.raises(ValueError, match="output_paths"):
+        waxcut.split_to_files(stream, [duration * 0.5], [tmp_path / "only_one.mp3"])
 
 
 def _mpeg1_stereo_128kbps_header(*, protection_bit: int) -> bytes:
@@ -357,6 +557,92 @@ def test_lame_gapless_tag_past_frame_end_is_not_read(tmp_path):
     assert stream.encoder_padding_samples == 0
 
 
+def test_vbri_tag_found_at_fixed_offset_for_non_mpeg1_stereo_frame(tmp_path):
+    # The VBRI header sits at a fixed 36-byte offset from the frame start
+    # (unlike Xing/Info, which follow the side info and so move around with
+    # channel mode/CRC). Use an MPEG1 mono, CRC-protected frame: the
+    # Xing/Info side-info formula (4 + crc + side_info = 4 + 2 + 17 = 23)
+    # lands well short of byte 36, so a VBRI tag placed at the real,
+    # fixed offset is only found if it's probed there specifically.
+    sync = 0x7FF << 21
+    version = 0b11 << 19  # MPEG1
+    layer = 0b01 << 17  # Layer III
+    protection = 0 << 16  # CRC present
+    bitrate_idx = 9 << 12  # 128kbps
+    sample_rate_idx = 0b00 << 10  # 44100Hz
+    channel_mode = 0b11 << 6  # mono
+    header = struct.pack(
+        ">I", sync | version | layer | protection | bitrate_idx | sample_rate_idx | channel_mode
+    )
+    frame_length = 417  # 144 * 128000 / 44100, truncated, no padding
+
+    crc = b"\x00\x00"
+    padding_to_vbri = b"\x00" * (36 - len(header) - len(crc))
+    frame_one = header + crc + padding_to_vbri + b"VBRI"
+    frame_one += b"\x00" * (frame_length - len(frame_one))
+    assert len(frame_one) == frame_length
+
+    frame_two = _mpeg1_stereo_128kbps_header(protection_bit=1) + b"\x00" * (frame_length - 4)
+
+    synthetic_mp3 = tmp_path / "vbri_mono_crc.mp3"
+    synthetic_mp3.write_bytes(frame_one + frame_two)
+
+    stream = waxcut.load_audio_stream(synthetic_mp3)
+    assert len(stream.frames) == 1
+    assert stream.frames[0].offset == frame_length
+
+
+def test_vbri_tag_is_never_parsed_as_a_lame_extension(tmp_path):
+    # N4 regression: _parse_lame_gapless didn't check which tag type
+    # tag_offset came from, so a VBRI tag's own version/delay/quality
+    # fields (which have no LAME extension in this layout at all) could
+    # be misread as a Xing-style flags word. An honest VBRI file is saved
+    # from this by the b"LAME" magic check a few lines later (VBRI's
+    # fields are never that by chance) -- but a deliberately crafted VBRI
+    # tag with a genuine "LAME3.100" string placed right where the old
+    # code would look for it after a zero flags word DID parse
+    # successfully, extracting delay/padding from a file that isn't LAME-
+    # encoded (and, per the format, can't be). Found by a fresh
+    # adversarial code review.
+    header = _mpeg1_stereo_128kbps_header(protection_bit=1)  # stereo, no CRC
+    frame_length = 417
+    pad_to_vbri = b"\x00" * (36 - len(header))
+    flags_word = b"\x00\x00\x00\x00"  # VBRI's own version(2)+delay(2), old code read as flags=0
+    version_string = b"LAME3.100"
+    unused = b"\x00" * (21 - len(version_string))
+    delay, padding = 576, 1584
+    delay_padding = bytes(
+        [
+            (delay >> 4) & 0xFF,
+            ((delay & 0xF) << 4) | ((padding >> 8) & 0xF),
+            padding & 0xFF,
+        ]
+    )
+    frame_one = header + pad_to_vbri + b"VBRI" + flags_word + version_string + unused + delay_padding
+    frame_one += b"\x00" * (frame_length - len(frame_one))
+    assert len(frame_one) == frame_length
+
+    frame_two = header + b"\x00" * (frame_length - len(header))
+
+    synthetic_mp3 = tmp_path / "vbri_fake_lame.mp3"
+    synthetic_mp3.write_bytes(frame_one + frame_two)
+
+    stream = waxcut.load_audio_stream(synthetic_mp3)
+    assert stream.encoder_delay_samples == 0
+    assert stream.encoder_padding_samples == 0
+
+
+def test_load_audio_stream_accepts_a_str_path(fixture_path):
+    # load_audio_stream called path.stat()/path.open() directly, so a str
+    # argument raised a raw, undocumented AttributeError instead of the
+    # FileNotFoundError/UnsupportedMp3Error/etc. contract the docstring
+    # promises -- coercing via Path(path) makes str behave identically to
+    # an already-constructed Path.
+    from_str = waxcut.load_audio_stream(str(fixture_path))
+    from_path = waxcut.load_audio_stream(fixture_path)
+    assert list(from_str.frames) == list(from_path.frames)
+
+
 def test_load_audio_stream_use_mmap_produces_identical_frames(fixture_path):
     normal = waxcut.load_audio_stream(fixture_path)
     with waxcut.load_audio_stream(fixture_path, use_mmap=True) as mmapped:
@@ -377,3 +663,60 @@ def test_load_audio_stream_use_mmap_split_output_matches_non_mmap(fixture_path):
         normal_first_half = waxcut.slice_bytes(normal.data, normal.frames, 0, cut_idx)
         assert mmap_first_half == normal_first_half
         assert isinstance(mmap_first_half, bytes)
+
+
+def _mpeg1_stereo_128kbps_frame() -> bytes:
+    """A complete (header + zero-filled body), valid MPEG1/128kbps/44100Hz/stereo frame."""
+    header = _mpeg1_stereo_128kbps_header(protection_bit=1)
+    frame_length = 417  # 144 * 128000 / 44100, truncated, no padding
+    return header + b"\x00" * (frame_length - len(header))
+
+
+def test_scan_frames_rejects_a_spurious_sync_before_real_audio(tmp_path):
+    # C3 regression: scan_frames accepted the very first candidate frame
+    # the instant its own 4 header bytes validated, without confirming a
+    # second real sync followed it -- a syntactically valid 4-byte header
+    # occurs by chance in arbitrary binary every few hundred KB and can be
+    # planted deliberately. A crafted MPEG2.5/8kbps/8000Hz header (72-byte
+    # claimed frame length) prepended to real MPEG1 audio made the whole
+    # file's reported sample_rate wrong by 5.5x and silently dropped the
+    # real first frame (its bytes fell inside the fake frame's claimed
+    # span). The first frame must now be confirmed by a second real sync
+    # immediately after it (or EOF) before being trusted.
+    fake_header = bytes.fromhex("ffe31400")
+    real_audio = _mpeg1_stereo_128kbps_frame() * 5
+
+    crafted = tmp_path / "crafted.mp3"
+    crafted.write_bytes(fake_header + real_audio)
+    honest = tmp_path / "honest.mp3"
+    honest.write_bytes(real_audio)
+
+    crafted_stream = waxcut.load_audio_stream(crafted)
+    honest_stream = waxcut.load_audio_stream(honest)
+
+    assert crafted_stream.sample_rate == honest_stream.sample_rate == 44100
+    assert len(crafted_stream.frames) == len(honest_stream.frames) == 5
+    crafted_whole = waxcut.slice_bytes(crafted_stream.data, crafted_stream.frames, 0, 5)
+    honest_whole = waxcut.slice_bytes(honest_stream.data, honest_stream.frames, 0, 5)
+    assert crafted_whole == honest_whole
+
+    raw = waxcut.scan_frames(crafted.read_bytes())
+    assert raw[0].offset == len(fake_header)  # locked onto the real frame, not the fake one
+
+
+def test_scan_frames_still_accepts_a_genuine_single_frame_with_a_trailer(tmp_path):
+    # Companion to the above: the confirmation check must not reject a
+    # genuine single-frame file just because nothing after it looks like a
+    # second MPEG header -- a real single-frame MP3 followed only by a
+    # short, non-frame trailer (an ID3v1 tag, in this construction) looks
+    # exactly like an unconfirmable first frame too. Must still recover
+    # the one real frame rather than reporting no audio found at all.
+    single_frame = _mpeg1_stereo_128kbps_frame()
+    id3v1_trailer = b"TAG" + b"\x00" * 125
+
+    synthetic_mp3 = tmp_path / "single_plus_trailer.mp3"
+    synthetic_mp3.write_bytes(single_frame + id3v1_trailer)
+
+    stream = waxcut.load_audio_stream(synthetic_mp3)
+    assert len(stream.frames) == 1
+    assert stream.sample_rate == 44100

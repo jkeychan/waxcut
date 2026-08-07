@@ -17,8 +17,8 @@ def test_one_input(data: bytes) -> None:
     except waxcut.UnsupportedMp3Error:
         return
 
-    waxcut.total_duration_ms(frames)
-    waxcut.frame_index_at(frames, len(data))
+    duration_ms = waxcut.total_duration_ms(frames)
+    waxcut.frame_index_at(frames, duration_ms)
     waxcut.slice_bytes(data, frames, 0, len(frames))
 
 

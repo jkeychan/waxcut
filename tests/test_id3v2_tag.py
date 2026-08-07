@@ -3,6 +3,7 @@ write_id3v2_tag. See test_frames.py for id3v2_size (the read-side
 companion) and test_misuse.py for input-validation cases."""
 
 import io
+import struct
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,32 @@ def test_write_id3v2_tag_produces_exact_expected_bytes():
     )
     assert tagged == expected_header + expected_frames + b"REST OF FILE"
     assert len(tagged) == 10 + 36 + len(b"REST OF FILE")
+
+
+def test_frame_size_field_is_plain_big_endian_not_syncsafe_above_127_bytes():
+    # Every other test in this file uses short text, so its frame content
+    # stays under 128 bytes -- syncsafe and plain big-endian encode
+    # identically below that threshold (both are 0x00 0x00 0x00 <7-bit
+    # value> for a one-byte quantity), so no existing test can tell them
+    # apart. A 199-char Latin-1 title makes the TIT2 frame's content exactly
+    # 200 bytes (1 encoding-flag byte + 199 text bytes), which is where the
+    # two encodings first diverge: struct.pack(">I", 200) is
+    # b"\x00\x00\x00\xc8", but ID3v2's syncsafe encoding of 200 (7
+    # significant bits/byte, v2.4-only -- this tag is v2.3) is
+    # b"\x00\x00\x01\x48" instead, since 200 doesn't fit in 7 bits.
+    title = "A" * 199
+    tagged = waxcut.write_id3v2_tag(b"REST", title=title)
+
+    # Latin-1 content is the 1-byte encoding flag plus the text verbatim
+    # (one byte per char for plain ASCII like this) -- 1 + 199 = 200.
+    content_length = 1 + len(title)
+    assert content_length == 200
+
+    frame_id = tagged[10:14]
+    frame_size_field = tagged[14:18]
+    assert frame_id == b"TIT2"
+    assert frame_size_field == struct.pack(">I", 200) == b"\x00\x00\x00\xc8"
+    assert frame_size_field != b"\x00\x00\x01\x48"  # what syncsafe(200) would have produced instead
 
 
 def test_write_id3v2_tag_with_no_fields_is_a_no_op_prepend_of_an_empty_tag():

@@ -26,7 +26,7 @@ in the repository for the current policy.
 ## Continuous fuzzing
 
 The frame parser is fuzzed continuously with
-[ClusterFuzzLite](https://github.com/jkeychan/waxcut/blob/main/.clusterfuzzlite/),
+[ClusterFuzzLite](https://github.com/jkeychan/waxcut/tree/main/.clusterfuzzlite/),
 via the
 [`cflite_pr.yml`](https://github.com/jkeychan/waxcut/actions/workflows/cflite_pr.yml)
 workflow. Every pull request is fuzzed against `scan_frames` — the only
@@ -52,17 +52,20 @@ Layer III frames (as little as ~24 bytes each) parses in linear time and
 never crashes, but produces one located frame per frame found.
 
 This used to cost real memory amplification: `AudioStream.frames` was
-originally a `list` of individually-allocated `Frame` objects (~168 bytes
+originally a `list` of individually-allocated `Frame` objects (~128 bytes
 each once you count the object itself plus its boxed int/float fields), so
-a 10 MB adversarial file produced ~58 MB of `Frame` objects — ~6x
-amplification on top of the input bytes, scaling linearly with input size.
-`AudioStream.frames` is now backed by compact packed arrays instead
-(`Frames`, ~24 bytes/frame, unboxed), with individual `Frame` objects
-constructed lazily only when you actually index into or iterate the
+a 10 MB adversarial file built from the smallest legal Layer III frame this
+parser accepts (24 bytes) produced ~56 MB of `Frame` objects — roughly
+**5.3x** amplification on top of the input bytes, scaling linearly with
+input size. `AudioStream.frames` is now backed by compact packed arrays
+instead (`Frames`, ~24 bytes/frame, unboxed), with individual `Frame`
+objects constructed lazily only when you actually index into or iterate the
 sequence. Re-measured on the same adversarial construction: the same 10 MB
-file now produces **~9.4 MB** of `Frames` storage — amplification of
-**~0.95x**, i.e. the parsed structure uses *less* memory than the input
-itself.
+file now produces **~10.5 MB** of `Frames` storage — amplification of
+roughly **1.0x**, i.e. the parsed structure's size roughly tracks the
+input's, rather than multiplying it several times over. Both figures come
+from `bench/security_claims.py` (item 1) — run it yourself to reproduce
+them.
 
 That removes amplification as a concern, but a single call still costs
 real, bounded time and memory proportional to input size — `scan_frames`
@@ -80,10 +83,28 @@ them in on demand. What still applies is *time*: parsing is O(n) in file
 size no matter what backs the bytes, so a large enough mmap'd file still
 costs real wall-clock time to scan. `use_mmap=True` is therefore governed
 by its own, larger **2 GB** limit, sized to bound that worst-case scan time
-rather than memory — measured at roughly **150 MB/s** against the same
-adversarial construction described above (a file packed edge-to-edge with
-minimum-size MPEG2.5 frames), so a 2 GB adversarial input costs on the
-order of ten seconds to scan rather than being unbounded.
+rather than memory.
+
+That worst case isn't a single number, though — it depends heavily on the
+input's shape. A file packed edge-to-edge with valid minimum-size frames
+scans at roughly **90 MB/s** on this author's development machine
+(`bench/security_claims.py`, item 2 — this is a hardware-dependent timing,
+not a portable constant; re-run the script on your own machine before
+relying on it). A buffer that never forms a valid sync at all (e.g. a
+carpet of `0xFF` bytes) is far slower per byte — around **5.5 MB/s** in the
+same benchmark (item 3), since every byte forces a failed header-parse
+attempt instead of skipping a whole frame at once. At that rate, scanning
+the full 2 GB cap byte-by-byte would take several minutes, not ten seconds.
+`scan_frames` never actually gets there on adversarial input, though:
+`_MAX_CONSECUTIVE_RESYNC_FAILURES` aborts the scan after 2,000,000
+consecutive failed resync attempts — about **360 ms** in the same benchmark
+— long before byte count alone would force the issue. The 2 GB cap is safe
+against the adversarial case for that reason, not because the raw
+never-a-valid-sync scan rate is fast enough to finish in bounded time on
+its own — it isn't. The ~90 MB/s figure still matters for the
+valid-frame-carpet case (every failed resync attempt there is followed by a
+real frame, so the resync-count bound never trips), where it keeps a full
+2 GB scan to well under a minute.
 
 Because the file stays memory-mapped for as long as the `AudioStream` is
 alive, callers using `use_mmap=True` are responsible for calling
@@ -115,12 +136,17 @@ consequence of the two functions sitting at different I/O boundaries, not
 an oversight.
 
 For completeness, the amplification from cue text to parsed timestamps is
-higher than the ~0.95x figure above for frame parsing — measured at
-roughly **3.9x**: a 5.93 MB cue sheet producing 99,999 timestamps peaks
-around 22.9 MB. Robustness has been checked the same way as the frame
-parser, if not yet via the same continuous ClusterFuzzLite harness: 40,000
-adversarial and mutated cue inputs run through `parse_cue_sheet` produced
-zero exceptions other than the documented `CueSheetError`.
+higher than the roughly-1.0x figure above for frame parsing — measured at
+roughly **3.8x**: a 6.5 MB cue sheet producing 99,999 timestamps peaks
+around 24.3 MB (`bench/security_claims.py`, item 4). Robustness against
+malformed input has been checked by a set of hand-constructed edge cases
+(see `tests/test_cue_sheet.py` — malformed timestamps, out-of-range
+fields, missing INDEX 01, multi-FILE sheets, out-of-order timestamps, and
+more), each asserted to raise `CueSheetError` and nothing else. Unlike
+`scan_frames`, `parse_cue_sheet` isn't yet wired into the continuous
+ClusterFuzzLite harness described above — see
+[Continuous fuzzing](#continuous-fuzzing) for exactly what that harness
+does and doesn't cover.
 
 ## `write_id3v2_tag`'s input guards
 
@@ -130,7 +156,7 @@ binary tag frames, rather than only reading and validating bytes handed to
 it. That text isn't necessarily hand-typed: a realistic pipeline pulls it
 straight from `parse_cue_sheet`'s `TITLE`/`PERFORMER` fields, which are
 themselves attacker-influenceable if the `.cue` file came from an untrusted
-source. Two guards keep that path bounded and unambiguous:
+source. Several guards keep that path bounded and unambiguous:
 
 - **Size**: the combined `TIT2`/`TPE1`/`TRCK` frame payload is capped by
   the ID3v2 tag format's own size field — a 4-byte syncsafe integer, whose
@@ -146,6 +172,23 @@ source. Two guards keep that path bounded and unambiguous:
   That's a parser-confusion bug class, the same family fuzzing (above)
   exists to catch, even though this particular case is a deterministic
   input-validation guard rather than something fuzzing found.
+- **No NUL/CR/LF in text fields**: `title`/`artist` containing NUL, CR, or
+  LF raise `ValueError` rather than passing through Latin-1/UTF-16 encoding
+  unremarked. A NUL truncates the field for any reader that treats it as a
+  C string terminator, and CR/LF can make stored content differ from what's
+  displayed — rejecting them is safer than silently stripping, which could
+  surprise a caller with different content than what they passed in.
+
+**Known limitation**: `write_id3v2_tag` does not implement ID3v2
+unsynchronisation (the spec-defined scheme that guarantees a false MPEG
+sync pattern can never occur inside a tag body, by inserting a `0x00` byte
+after every `0xFF` byte and setting a flag telling compliant readers to
+undo that). A crafted title/artist could in principle produce a false sync
+word (e.g. `0xFF 0xFB`) inside the written tag. waxcut itself is
+unaffected — it always skips the tag via `id3v2_size` before scanning for
+frames — but a non-compliant player that scans for sync words without
+first parsing the ID3v2 header could misdecode tag bytes as audio ahead of
+the real content. Tracked as a follow-up, not implemented yet.
 
 ## Supply-chain and process posture
 
@@ -158,8 +201,8 @@ automated programs:
   more) and publishes a score.
 - **[OpenSSF Best Practices](https://www.bestpractices.dev/projects/13947)**
   — a self-assessed but publicly verifiable checklist covering the OpenSSF
-  Best Practices Badge criteria (change control, quality, security). waxcut
-  is currently at 100% passing.
+  Best Practices Badge criteria (change control, quality, security); see
+  the linked badge for the current status.
 
 Ordinary CI — build, lint, and the full test suite, including the
 mutagen/ffmpeg cross-validation described in

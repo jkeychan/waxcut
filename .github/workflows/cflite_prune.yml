@@ -1,19 +1,17 @@
-name: ClusterFuzzLite PR fuzzing
+name: ClusterFuzzLite corpus pruning
 
 on:
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "src/**"
-      - ".clusterfuzzlite/**"
-      - ".github/workflows/cflite_pr.yml"
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
 
 permissions: {}
 
 jobs:
-  fuzz:
-    name: PR fuzzing (short run)
+  prune:
+    name: Corpus pruning
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       # `actions: read` lets ClusterFuzzLite list and download the corpus
       # artifact from previous runs via the Actions API; the matching
@@ -33,7 +31,8 @@ jobs:
       # wrapper (as above) does not pin that image. Called directly by
       # digest instead, replicating the wrapper's exact input-to-env
       # mapping (including its declared defaults for inputs we don't set)
-      # so behavior is unchanged.
+      # so behavior is unchanged. Same images as cflite_batch.yml, since
+      # pruning shares the build step and the run step's MODE input.
       - name: Build fuzzers
         id: build
         uses: docker://gcr.io/oss-fuzz-base/clusterfuzzlite-build-fuzzers@sha256:e3430847d309a0a1110f7e17b69a0c02121a40f6d67f711c58c662a940498d42 # v1
@@ -48,11 +47,11 @@ jobs:
           CFL_PLATFORM: github
           LOW_DISK_SPACE: "True"
 
-      - name: Run fuzzers
+      - name: Prune corpus
         uses: docker://gcr.io/oss-fuzz-base/clusterfuzzlite-run-fuzzers@sha256:9a94c0cfa36aad7419092fb21c4eaecf276a62eacf3faa20ddb7526e5ff60aed # v1
         env:
-          FUZZ_SECONDS: "300"
-          MODE: code-change
+          FUZZ_SECONDS: "1800"
+          MODE: prune
           LANGUAGE: c++
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: "false"

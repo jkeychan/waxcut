@@ -18,8 +18,10 @@ from pathlib import Path
 from waxcut import load_audio_stream
 from waxcut.frames import _parse_header
 
-# MPEG2.5, mono, no CRC, lowest bitrate (8kbps), 8000Hz, no padding --
-# the smallest legal Layer III frame this codebase's header parser accepts.
+# MPEG2.5, mono, no CRC, lowest bitrate (8kbps), 8000Hz, no padding -- a
+# small legal Layer III frame (72 bytes). Not the smallest this codebase's
+# header parser accepts -- MPEG2/8kbps/24000Hz is smaller, at 24 bytes (see
+# bench/security_claims.py) -- but small enough for this benchmark's purpose.
 _HEADER_BITS = "11111111111000110001100011000000"
 _ADVERSARIAL_FRAME_COUNT = 300_000  # ~20MB total
 

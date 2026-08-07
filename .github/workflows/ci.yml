@@ -33,6 +33,7 @@ jobs:
         run: uv run pytest tests/ -v
 
   lint:
+    name: Lint
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,3 +52,6 @@ jobs:
 
       - name: Run ruff format --check
         run: uv run ruff format --check .
+
+      - name: Run mypy
+        run: uv run mypy

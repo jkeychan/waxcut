@@ -29,6 +29,8 @@ dependencies = []
 Homepage = "https://github.com/jkeychan/waxcut"
 Repository = "https://github.com/jkeychan/waxcut"
 Issues = "https://github.com/jkeychan/waxcut/issues"
+Documentation = "https://waxcut.pages.dev/"
+Changelog = "https://github.com/jkeychan/waxcut/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]
@@ -36,6 +38,10 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["src/waxcut"]
 
 [tool.ruff]
 line-length = 110
@@ -75,5 +81,6 @@ select = [
 dev = [
     "pytest>=9.1.1",
     "mutagen>=1.48.1",
+    "mypy>=1.19.0",
     "ruff>=0.16.1",
 ]
