@@ -29,6 +29,18 @@ jobs:
           # published artifact before it reaches PyPI.
           enable-cache: false
 
+      - name: Verify release tag matches pyproject.toml version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          PYPROJECT_VERSION="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')"
+          EXPECTED_TAG="v${PYPROJECT_VERSION}"
+          if [ "${RELEASE_TAG}" != "${EXPECTED_TAG}" ]; then
+            echo "Release tag '${RELEASE_TAG}' does not match pyproject.toml version '${PYPROJECT_VERSION}' (expected tag '${EXPECTED_TAG}')" >&2
+            exit 1
+          fi
+          echo "Release tag '${RELEASE_TAG}' matches pyproject.toml version '${PYPROJECT_VERSION}'"
+
       - name: Build
         run: uv build
 
