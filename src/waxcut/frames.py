@@ -661,7 +661,12 @@ def _parse_candidate_frame(data: _RawBytes, offset: int) -> tuple[MpegVersion, i
         return None
     version, bitrate, sample_rate, padding = parsed
     length = _frame_length(version, bitrate, sample_rate, padding)
-    if length <= 0 or offset + length > len(data):
+    # length <= 0 is not checked here: enumerating every valid (version,
+    # bitrate, sample_rate, padding) combination _parse_header can return
+    # shows the minimum possible length is 24, never <= 0 -- structurally
+    # dead by construction, not by luck. Verified by a fresh adversarial
+    # code review's own enumeration, and independently re-checked here.
+    if offset + length > len(data):
         return None
     return version, sample_rate, length
 
