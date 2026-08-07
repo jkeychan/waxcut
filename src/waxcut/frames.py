@@ -311,13 +311,21 @@ class Frames(Sequence["Frame"]):
 
 _ID3V2_HEADER_SIZE = 10
 
+# bytearray supports .find()/indexing/slicing identically to bytes, so
+# scan_frames/id3v2_size/slice_bytes (and the private helpers they call
+# with the same `data`) accept it too -- a memoryview does not (no
+# .find()) despite superficially looking bytes-like otherwise.
+_RawBytes = bytes | bytearray | mmap.mmap
 
-def id3v2_size(data: bytes | mmap.mmap) -> int:
+_ID3V2_FOOTER_MIN_MAJOR_VERSION = 4  # the footer flag (0x10) is ID3v2.4-only
+
+
+def id3v2_size(data: _RawBytes) -> int:
     """Return the byte length of a leading ID3v2 tag, or 0 if there isn't one.
 
     Args:
-        data: Raw file bytes. Any bytes-like object indexable/sliceable
-            the same way as bytes is accepted.
+        data: Raw file bytes. bytes, bytearray, or mmap.mmap -- a
+            memoryview is not accepted (it has no .find()).
 
     Returns:
         The size in bytes of the ID3v2 tag if present (including the 10-byte
@@ -331,8 +339,11 @@ def id3v2_size(data: bytes | mmap.mmap) -> int:
         size = (size << 7) | (byte & 0x7F)
     # Flags bit 0x10 (ID3v2.4 only) means a 10-byte footer -- a mirror of
     # the header -- immediately follows the tag body, and its length isn't
-    # included in the syncsafe size field above.
-    if data[5] & 0x10:
+    # included in the syncsafe size field above. data[3] is the major
+    # version; that bit is reserved (must be zero) in ID3v2.2/2.3, so a
+    # tag that sets it anyway must not have 10 bytes skipped that were
+    # never actually written -- found by a fresh adversarial code review.
+    if data[3] >= _ID3V2_FOOTER_MIN_MAJOR_VERSION and data[5] & 0x10:
         size += 10
     return _ID3V2_HEADER_SIZE + size
 
@@ -470,7 +481,7 @@ def write_id3v2_tag(
     return header + frame_bytes + data
 
 
-def _parse_header(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVersion, int, int, int] | None:
+def _parse_header(data: _RawBytes, offset: int) -> tuple[MpegVersion, int, int, int] | None:
     """Return (version, bitrate_kbps, sample_rate, padding) for a valid Layer III header, else None."""
     if offset + 4 > len(data):
         return None
@@ -513,7 +524,7 @@ def _has_crc(header: int) -> bool:
     return protection_bit == 0
 
 
-def _vbr_header_tag_offset(data: bytes | mmap.mmap, frame: Frame, version: MpegVersion) -> int | None:
+def _vbr_header_tag_offset(data: _RawBytes, frame: Frame, version: MpegVersion) -> int | None:
     """Byte offset (relative to `frame.offset`) of a Xing/Info/VBRI tag, if this frame is one."""
     header = struct.unpack_from(">I", data, frame.offset)[0]
     side_info = _SIDE_INFO_SIZE[(version, _is_mono(header))]
@@ -542,7 +553,7 @@ _LAME_DELAY_PADDING_SIZE = 3  # bytes holding two packed 12-bit fields
 _TWELVE_BIT_FIELD_LIMIT = 4096
 
 
-def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
+def _parse_lame_gapless(data: _RawBytes, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
     """Extract (encoder_delay_samples, encoder_padding_samples) from a LAME extension tag, if present."""
     pos = frame.offset + tag_offset
     # The LAME extension lives inside the same frame as the Xing/Info tag
@@ -587,7 +598,7 @@ def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) 
     return delay, padding
 
 
-def _parse_candidate_frame(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVersion, int, int] | None:
+def _parse_candidate_frame(data: _RawBytes, offset: int) -> tuple[MpegVersion, int, int] | None:
     """(version, sample_rate, length) for a valid, in-bounds frame at offset, else None.
 
     Combines _parse_header's header validation with _frame_length's length
@@ -605,7 +616,7 @@ def _parse_candidate_frame(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVe
     return version, sample_rate, length
 
 
-def _confirm_first_frame(data: bytes | mmap.mmap, offset: int, length: int) -> bool:
+def _confirm_first_frame(data: _RawBytes, offset: int, length: int) -> bool:
     """Whether a first-frame candidate is followed by a second real sync, or EOF.
 
     A sync-mask match plus valid version/layer/bitrate/sample-rate bits occurs
@@ -667,7 +678,7 @@ def _finalize_scan(
     return Frames(offsets, lengths, start_ms_values, duration_ms_values)
 
 
-def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Frames:
+def scan_frames(data: _RawBytes, *, max_size: int | None = None) -> Frames:
     """Scan raw MP3 bytes and return every located frame, in order.
 
     Skips a leading ID3v2 tag if present. Includes the Xing/Info/VBRI
@@ -868,13 +879,20 @@ def frame_index_at(frames: Sequence[Frame], target_ms: float) -> int:
     return max(idx, 0)
 
 
-def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes:
-    """Byte range covering frames[start_idx:end_idx], contiguous.
+def slice_bytes(data: _RawBytes, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes:
+    """Byte range spanning frames[start_idx:end_idx].
 
-    This is a plain byte-copy, not a re-parse: frames are assumed
-    contiguous (true for anything scan_frames produced from the same
-    `data`), so the range is just [frames[start_idx].offset,
-    frames[end_idx - 1] end).
+    This is a plain byte-copy, not a re-parse: the range returned is
+    exactly [frames[start_idx].offset, frames[end_idx - 1] end), regardless
+    of what lies between those two points. For output from a single,
+    uninterrupted scan_frames call over the same `data`, consecutive
+    frames are contiguous (each one starts exactly where the previous one
+    ends) and this is a clean cut with nothing else in it. It is NOT
+    guaranteed for frames assembled from a scan that skipped a gap
+    (adversarial or corrupted input the scanner resynced past) or from a
+    caller-constructed Sequence[Frame] mixing frames from different
+    sources -- in either case, bytes between two non-adjacent frames are
+    silently included in the slice too.
 
     Args:
         data: The same bytes `frames` was derived from.
@@ -889,9 +907,10 @@ def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int
         of range for `frames` (e.g. start_idx=len(frames)+1,
         end_idx=len(frames)+1): this check runs before either index is
         used to index into `frames`, so an empty range never raises even
-        if its indices wouldn't be valid on their own. This output is
-        itself a decodable MP3 stream (no container/ID3 wrapper),
-        byte-identical to the corresponding span of the original file.
+        if its indices wouldn't be valid on their own. For contiguous
+        input (see above), this output is itself a decodable MP3 stream
+        (no container/ID3 wrapper), byte-identical to the corresponding
+        span of the original file.
 
     Raises:
         ValueError: `frames` is empty.
@@ -909,7 +928,13 @@ def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int
         return b""
     start = frames[start_idx].offset
     end = frames[end_idx - 1].offset + frames[end_idx - 1].length
-    return data[start:end]
+    # bytes(x) is a no-op (returns x itself) when x is already bytes or an
+    # mmap slice (mmap.__getitem__ always returns bytes), but a bytearray
+    # slice is itself a bytearray -- without this coercion, bytearray
+    # input made slice_bytes return bytearray despite being annotated
+    # -> bytes, which mypy --strict accepted (bytearray silently satisfies
+    # a bytes usage nowhere else in the type system) but is unsound.
+    return bytes(data[start:end])
 
 
 @dataclass(frozen=True, slots=True, eq=False)

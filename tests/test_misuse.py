@@ -41,6 +41,17 @@ def test_slice_bytes_rejects_negative_indices():
         waxcut.slice_bytes(b"\x00" * 10, frames, 0, -1)
 
 
+def test_slice_bytes_returns_bytes_not_bytearray_for_bytearray_input():
+    # I3 regression: slice_bytes is annotated -> bytes, but data[start:end]
+    # on a bytearray input returns a bytearray -- unsound (mypy --strict
+    # accepted it silently) and surprising, since a caller who checks
+    # isinstance(result, bytes) would get a different answer depending on
+    # what type they happened to pass in for otherwise-identical content.
+    frames = [waxcut.Frame(offset=0, length=10, start_ms=0.0, duration_ms=26.0)]
+    result = waxcut.slice_bytes(bytearray(b"\x00" * 10), frames, 0, 1)
+    assert type(result) is bytes
+
+
 FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE_NAMES = [
     "cbr_stereo.mp3",

@@ -103,6 +103,18 @@ def test_id3v2_size_includes_footer_when_flag_set():
     assert waxcut.id3v2_size(header + b"12345" + b"rest") == 25
 
 
+def test_id3v2_size_ignores_footer_flag_bit_on_pre_v2_4_tags():
+    # I6 regression: bit 0x10 is ID3v2.4-only -- it's reserved (must be
+    # zero) in v2.2/v2.3, so a v2.3 tag with that bit set anyway (major
+    # version byte 0x03, not 0x04) must not have 10 bytes skipped that
+    # were never actually written. Found by a fresh adversarial code
+    # review: the version byte (data[3]) was never checked, so this
+    # produced an offset 10 bytes short of the real first audio frame for
+    # any tag setting that reserved bit.
+    header = b"ID3\x03\x00\x10\x00\x00\x00\x05"
+    assert waxcut.id3v2_size(header + b"12345" + b"rest") == 15
+
+
 def test_frames_is_importable_from_top_level_waxcut():
     assert waxcut.Frames is Frames
 
