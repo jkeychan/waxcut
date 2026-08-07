@@ -768,7 +768,13 @@ class AudioStream:
             tag, in samples at the stream's own sample rate — informational
             only. Real players stop this many samples early, but split
             output is fresh audio with no padding semantics to carry over.
-        sample_rate: Audio sample rate in Hz (e.g. 44100, 48000).
+        sample_rate: Audio sample rate in Hz (e.g. 44100, 48000), read
+            from the first frame's own header only. A stream with a
+            genuinely mixed sample rate across frames (rare, but legal
+            per the MPEG spec) isn't specially detected or handled --
+            this always reflects the first frame, and later frames at a
+            different rate are parsed and split normally but don't
+            change what this attribute reports.
     """
 
     data: bytes | mmap.mmap
