@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: minor bumps may include breaking changes).
 
+## [Unreleased]
+
+### Added
+
+- `WaxcutError`: common base class for waxcut's parse/format errors
+  (`UnsupportedMp3Error`, `FileTooLargeError`, `CueSheetError`).
+- `Frames`: memory-compact, array-backed sequence type returned by
+  `scan_frames` and found on `AudioStream.frames`.
+- `split_to_files`: split directly to disk without holding every
+  segment in memory at once.
+
+### Changed
+
+- `AudioStream` equality/hashing is now identity-based, not field-wise
+  — two `AudioStream`s parsed from the same file are no longer `==`.
+- A stepped slice on `Frames` (e.g. `frames[::2]`) now raises
+  `TypeError` instead of `ValueError`.
+- `write_id3v2_tag` now rejects NUL/CR/LF in `title`/`artist` text with
+  `ValueError` instead of passing them through unremarked.
+- `scan_frames` now aborts after a bounded number of consecutive failed
+  resync attempts, instead of scanning purely-adversarial input all
+  the way to `max_size`.
+
+### Fixed
+
+- `scan_frames` no longer discards already-located valid frames when
+  the resync-abort bound above trips; it now returns what was found so
+  far, matching the natural-exhaustion case. The bound still raises
+  `UnsupportedMp3Error` when it trips with zero frames located.
+
 ## [0.3.1] - 2026-08-06
 
 ### Fixed
