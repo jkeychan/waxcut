@@ -133,7 +133,7 @@ class UnsupportedMp3Error(WaxcutError):
 # file (measured; see SECURITY.md) -- it was ~6x before that redesign
 # (Frame objects boxed per-frame). This limit now exists to bound the
 # absolute worst-case time/memory of a single call, not to guard against
-# amplification specifically: 250 MB comfortably covers legitimate use
+# amplification specifically: 250 MiB comfortably covers legitimate use
 # (even multi-hour, high-bitrate recordings) while keeping a single call's
 # cost bounded. See SECURITY.md for the full threat-model note.
 _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
@@ -204,8 +204,8 @@ _MIB_PER_GIB = 1024  # used to format FileTooLargeError's message below
 class FileTooLargeError(UnsupportedMp3Error):
     """Raised when input exceeds the applicable size limit.
 
-    The default limit is _MAX_FILE_SIZE_BYTES (250 MB); load_audio_stream
-    applies the larger _MAX_MMAP_FILE_SIZE_BYTES (2 GB) instead when called
+    The default limit is _MAX_FILE_SIZE_BYTES (250 MiB); load_audio_stream
+    applies the larger _MAX_MMAP_FILE_SIZE_BYTES (2 GiB) instead when called
     with use_mmap=True.
 
     A subclass of UnsupportedMp3Error, so existing `except
@@ -499,7 +499,7 @@ def write_id3v2_tag(
             corrupt frame scanning, since scan_frames/id3v2_size only ever
             skip the outermost tag), or the combined size of the requested
             frames does not fit in a 4-byte ID3v2 syncsafe integer (the
-            ~256 MB tag-size ceiling the format itself imposes --
+            ~256 MiB tag-size ceiling the format itself imposes --
             effectively unreachable for title/artist/track text, but
             guarded rather than silently overflowing).
     """
@@ -754,10 +754,10 @@ def scan_frames(data: _RawBytes, *, max_size: int | None = None) -> Frames:
             memoryview is not (it has no .find()), despite superficially
             looking bytes-like otherwise. A plain bytes object is the
             tested and expected case.
-        max_size: Maximum allowed size in bytes. Defaults to 250 MB, the
+        max_size: Maximum allowed size in bytes. Defaults to 250 MiB, the
             same cap load_audio_stream applies by default; pass a larger
             value to override it (load_audio_stream does this internally
-            to apply its own, larger 2 GB cap when called with
+            to apply its own, larger 2 GiB cap when called with
             use_mmap=True). Most callers should leave this at the default.
 
     Returns:
@@ -1109,7 +1109,7 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
             when done, or use the AudioStream as a context manager
             (`with load_audio_stream(path, use_mmap=True) as stream:`).
             Governed by a separate, larger size cap than the default path
-            (2 GB vs. 250 MB) -- see FileTooLargeError below. Not modifying
+            (2 GiB vs. 250 MiB) -- see FileTooLargeError below. Not modifying
             or deleting the file on disk while an AudioStream from this
             mode is open: on POSIX, deleting it is safe (the mapping keeps
             working via the file's inode), but modifying it in place is not
@@ -1136,7 +1136,7 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
             most of these, which would otherwise bypass the size limit
             below entirely.
         FileTooLargeError: The file exceeds the applicable size limit --
-            250 MB by default, or 2 GB with use_mmap=True. Checked against
+            250 MiB by default, or 2 GiB with use_mmap=True. Checked against
             the file's size on disk before opening it, so an oversized file
             is never read or mapped in the first place. See SECURITY.md.
         FileNotFoundError: The file at `path` does not exist.
@@ -1157,8 +1157,15 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
     file_size = path.stat().st_size
     max_size = _MAX_MMAP_FILE_SIZE_BYTES if use_mmap else _MAX_FILE_SIZE_BYTES
     if file_size > max_size:
-        limit_mb = max_size / (1024 * 1024)
-        limit_str = f"{limit_mb / _MIB_PER_GIB:.0f} GB" if limit_mb >= _MIB_PER_GIB else f"{limit_mb:.0f} MB"
+        # N6: the caps below are binary (250 * 1024**2, 2 * 1024**3) --
+        # MiB/GiB, not decimal MB/GB. This message used to say "MB"/"GB"
+        # for the same values other comments in this file correctly
+        # labeled MiB/GiB, an internal inconsistency found by a fresh
+        # adversarial code review.
+        limit_mib = max_size / (1024 * 1024)
+        limit_str = (
+            f"{limit_mib / _MIB_PER_GIB:.0f} GiB" if limit_mib >= _MIB_PER_GIB else f"{limit_mib:.0f} MiB"
+        )
         raise FileTooLargeError(
             f"{path} is {file_size} bytes, exceeding the {max_size}-byte ({limit_str}) limit."
         )
