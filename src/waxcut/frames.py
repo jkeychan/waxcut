@@ -1125,6 +1125,12 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
     else:
         data = path.read_bytes()
 
+    # try/finally with a success flag rather than except Exception: same
+    # reasoning as the mmap-creation block above -- a KeyboardInterrupt
+    # during this block isn't an Exception subclass, so except Exception
+    # wouldn't run this cleanup and the fd/mapping would leak. Found by a
+    # fresh adversarial code review.
+    succeeded = False
     try:
         raw_frames = scan_frames(data, max_size=max_size)
         first = raw_frames[0]
@@ -1142,7 +1148,9 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
         tag_offset = _vbr_header_tag_offset(data, first, version)
 
         if tag_offset is None:
-            return AudioStream(data, raw_frames, 0, 0, sample_rate, _file=file_handle)
+            stream = AudioStream(data, raw_frames, 0, 0, sample_rate, _file=file_handle)
+            succeeded = True
+            return stream
 
         gapless = _parse_lame_gapless(data, first, tag_offset)
         delay, padding = gapless if gapless else (0, 0)
@@ -1155,12 +1163,13 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
         rebased = raw_frames[1:].rebase(first.duration_ms)
         if not rebased:
             raise UnsupportedMp3Error("File contains only a VBR header frame, no audio.")
-        return AudioStream(data, rebased, delay, padding, sample_rate, _file=file_handle)
-    except Exception:
-        if use_mmap:
+        stream = AudioStream(data, rebased, delay, padding, sample_rate, _file=file_handle)
+        succeeded = True
+        return stream
+    finally:
+        if not succeeded and use_mmap:
             data.close()  # type: ignore[union-attr]
             file_handle.close()  # type: ignore[union-attr]
-        raise
 
 
 def split_at(stream: AudioStream, timestamps_ms: Sequence[float]) -> list[bytes]:

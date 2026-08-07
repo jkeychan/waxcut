@@ -481,3 +481,38 @@ def test_load_audio_stream_mmap_closes_file_handle_on_keyboard_interrupt(monkeyp
         waxcut.load_audio_stream(FIXTURES / "cbr_stereo.mp3", use_mmap=True)
 
     assert captured["file_handle"].closed
+
+
+def test_load_audio_stream_mmap_closes_on_keyboard_interrupt_during_parsing(monkeypatch):
+    # I4 regression: the second cleanup block (around scan_frames/tag
+    # parsing, not mmap creation itself) used `except Exception`, which
+    # doesn't catch KeyboardInterrupt either -- same leak, different
+    # block. Found by a fresh adversarial code review; fixed the same way
+    # as test_load_audio_stream_mmap_closes_file_handle_on_keyboard_interrupt
+    # above (try/finally with a success flag).
+    captured: dict[str, object] = {}
+    real_open = Path.open
+    real_mmap_ctor = mmap.mmap
+
+    def spy_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        captured["file_handle"] = handle
+        return handle
+
+    def spy_mmap(*args, **kwargs):
+        mapped = real_mmap_ctor(*args, **kwargs)
+        captured["mmap"] = mapped
+        return mapped
+
+    def raising_scan_frames(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    monkeypatch.setattr(mmap, "mmap", spy_mmap)
+    monkeypatch.setattr("waxcut.frames.scan_frames", raising_scan_frames)
+
+    with pytest.raises(KeyboardInterrupt):
+        waxcut.load_audio_stream(FIXTURES / "cbr_stereo.mp3", use_mmap=True)
+
+    assert captured["file_handle"].closed
+    assert captured["mmap"].closed
