@@ -347,7 +347,14 @@ def id3v2_size(data: _RawBytes) -> int:
 
     Returns:
         The size in bytes of the ID3v2 tag if present (including the 10-byte
-        header), or 0 if no ID3v2 tag is found.
+        header), or 0 if no ID3v2 tag is found. Clamped to len(data): a
+        tag's declared size can never legitimately exceed the buffer that
+        contains it, so a syncsafe size field claiming more than that (a
+        crafted or corrupted four bytes) is capped rather than trusted --
+        without this, callers like scan_frames start their scan past EOF
+        and report no audio found at all in a file that may have perfectly
+        good frames after a merely mis-sized tag. Found by a fresh
+        adversarial code review.
     """
     if len(data) < _ID3V2_HEADER_SIZE or data[:3] != b"ID3":
         return 0
@@ -363,7 +370,7 @@ def id3v2_size(data: _RawBytes) -> int:
     # never actually written -- found by a fresh adversarial code review.
     if data[3] >= _ID3V2_FOOTER_MIN_MAJOR_VERSION and data[5] & 0x10:
         size += 10
-    return _ID3V2_HEADER_SIZE + size
+    return min(_ID3V2_HEADER_SIZE + size, len(data))
 
 
 _ID3V2_TAG_VERSION = b"\x03\x00"  # ID3v2.3.0: far more widely supported by

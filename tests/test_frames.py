@@ -98,9 +98,25 @@ def test_id3v2_size_with_tag():
 def test_id3v2_size_includes_footer_when_flag_set():
     # Flags byte 0x10 (bit 4, ID3v2.4-only) means a 10-byte footer mirrors
     # the header at the end of the tag -- its length isn't part of the
-    # syncsafe size field and must be added on top of it.
+    # syncsafe size field and must be added on top of it. Buffer must be
+    # long enough to actually hold the declared tag+footer (25 bytes) plus
+    # some real trailing content, or the N2 len(data) clamp below would
+    # mask this assertion instead of exercising the footer math.
     header = b"ID3\x04\x00\x10\x00\x00\x00\x05"
-    assert waxcut.id3v2_size(header + b"12345" + b"rest") == 25
+    body_and_footer = b"12345" + b"\x00" * 10  # 5-byte body + 10-byte footer
+    assert waxcut.id3v2_size(header + body_and_footer + b"rest") == 25
+
+
+def test_id3v2_size_clamps_a_declared_size_larger_than_the_buffer():
+    # N2 regression: a crafted or corrupted 4-byte syncsafe size field can
+    # claim far more than the buffer actually holds -- unclamped, callers
+    # like scan_frames start their scan past EOF and report no audio found
+    # at all in a file that may have perfectly good frames right after a
+    # merely mis-sized tag. Found by a fresh adversarial code review.
+    huge_size = (0x7F << 21) | (0x7F << 14) | (0x7F << 7) | 0x7F  # max syncsafe value
+    header = b"ID3\x03\x00\x00" + bytes([(huge_size >> s) & 0x7F for s in (21, 14, 7, 0)])
+    data = header + b"only 5 bytes"
+    assert waxcut.id3v2_size(data) == len(data)
 
 
 def test_id3v2_size_ignores_footer_flag_bit_on_pre_v2_4_tags():

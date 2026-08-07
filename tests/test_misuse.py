@@ -191,10 +191,14 @@ def test_scan_frames_rejects_various_garbage(garbage):
 
 def test_id3v2_tag_claiming_huge_size_does_not_hang_or_crash():
     # Syncsafe 0x7F,0x7F,0x7F,0x7F = the maximum representable size
-    # (~256MB) claimed on a file that's actually 14 bytes long.
+    # (~256MB) claimed on a file that's actually 14 bytes long. N2 fix:
+    # id3v2_size now clamps to len(data) rather than returning an offset
+    # past EOF (which used to make scan_frames start past the whole
+    # buffer and report "no audio found" for the wrong reason -- it never
+    # even looked, rather than genuinely finding nothing).
     header = b"ID3\x04\x00\x00" + b"\x7f\x7f\x7f\x7f"
     tiny_file = header + b"\x00\x00\x00\x00"
-    assert waxcut.id3v2_size(tiny_file) > len(tiny_file)
+    assert waxcut.id3v2_size(tiny_file) == len(tiny_file)
 
     with pytest.raises(waxcut.UnsupportedMp3Error):
         waxcut.scan_frames(tiny_file)
