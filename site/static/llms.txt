@@ -6,9 +6,9 @@ Install: `pip install waxcut` or `uv add waxcut`. Zero runtime dependencies.
 
 ## Docs
 
-- [Getting Started](https://waxcut.pages.dev/docs/getting-started): install and usage, including `split_at` for N-way splits
+- [Getting Started](https://waxcut.pages.dev/docs/getting-started): install and usage, including `split_at` for N-way splits, `write_id3v2_tag` for tagging output, `parse_cue_sheet` for cue-sheet-driven splits, and `use_mmap`/`split_to_files` for large files
 - [API Reference](https://waxcut.pages.dev/docs/api-reference): every public function/class — signature, args, returns, raises
-- [How It Works](https://waxcut.pages.dev/docs/how-it-works): why frame-based splitting is safe; VBR, ID3v2, and LAME gapless handling
+- [How It Works](https://waxcut.pages.dev/docs/how-it-works): why frame-based splitting is safe; VBR, ID3v2, LAME gapless, and mmap loading
 - [Security](https://waxcut.pages.dev/docs/security): fuzzing, OpenSSF Scorecard, vulnerability reporting
 
 ## Optional
