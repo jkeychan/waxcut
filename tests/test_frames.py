@@ -18,6 +18,7 @@ FIXTURE_NAMES = [
     "cbr_stereo.mp3",
     "cbr_mono.mp3",
     "vbr_stereo.mp3",
+    "lavc_vbr_stereo.mp3",
     "lame_vbr_stereo.mp3",
     "mono_8khz.mp3",
     "joint_stereo_vbr.mp3",
@@ -143,13 +144,30 @@ def test_audio_stream_equality_and_hash_are_identity_based(fixture_path):
 
 
 def test_ffmpeg_native_encoder_does_not_produce_false_gapless_values():
-    # cbr_stereo.mp3/cbr_mono.mp3 are encoded with ffmpeg's native "Lavc..."
-    # tagged encoder, not real LAME — regression test for misreading that
-    # tag's bytes as if they were LAME's gapless delay/padding fields.
-    for name in ("cbr_stereo.mp3", "cbr_mono.mp3"):
+    # cbr_stereo.mp3/cbr_mono.mp3/lavc_vbr_stereo.mp3 are encoded with
+    # ffmpeg's native "Lavc..." tagged encoder, not real LAME — regression
+    # test for misreading that tag's bytes as if they were LAME's gapless
+    # delay/padding fields.
+    for name in ("cbr_stereo.mp3", "cbr_mono.mp3", "lavc_vbr_stereo.mp3"):
         stream = waxcut.load_audio_stream(FIXTURES / name)
         assert stream.encoder_delay_samples == 0
         assert stream.encoder_padding_samples == 0
+
+
+def test_real_lame_encode_reports_known_gapless_delay_and_padding():
+    # lame_vbr_stereo.mp3 is a genuine `lame --vbr-new -q 4` encode (LAME
+    # 3.100) of a 2-second sine wave -- unlike every synthetic-header test
+    # above, its bytes are exactly what a real encoder wrote, not a
+    # hand-crafted layout. 576 is a widely-documented LAME constant (its
+    # MDCT filter's fixed encoder delay, independent of quality/bitrate
+    # settings); the padding value below was read back from this specific
+    # file's own bytes (not assumed) via load_audio_stream and cross-
+    # checked against mutagen's independently-computed duration, which
+    # matches the source's true 2000ms length almost exactly once this
+    # delay+padding is trimmed -- see test_duration_matches_mutagen.
+    stream = waxcut.load_audio_stream(FIXTURES / "lame_vbr_stereo.mp3")
+    assert stream.encoder_delay_samples == 576
+    assert stream.encoder_padding_samples == 1080
 
 
 def test_playable_duration_ms_trims_gapless_delay_and_padding():
