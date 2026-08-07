@@ -92,6 +92,14 @@ def test_id3v2_size_with_tag():
     assert waxcut.id3v2_size(header + b"12345" + b"rest") == 15
 
 
+def test_id3v2_size_includes_footer_when_flag_set():
+    # Flags byte 0x10 (bit 4, ID3v2.4-only) means a 10-byte footer mirrors
+    # the header at the end of the tag -- its length isn't part of the
+    # syncsafe size field and must be added on top of it.
+    header = b"ID3\x04\x00\x10\x00\x00\x00\x05"
+    assert waxcut.id3v2_size(header + b"12345" + b"rest") == 25
+
+
 def test_unsupported_file_raises():
     with pytest.raises(waxcut.UnsupportedMp3Error):
         waxcut.scan_frames(b"this is not an mp3 file at all")

@@ -238,6 +238,11 @@ def id3v2_size(data: bytes) -> int:
     size = 0
     for byte in data[6:10]:
         size = (size << 7) | (byte & 0x7F)
+    # Flags bit 0x10 (ID3v2.4 only) means a 10-byte footer -- a mirror of
+    # the header -- immediately follows the tag body, and its length isn't
+    # included in the syncsafe size field above.
+    if data[5] & 0x10:
+        size += 10
     return _ID3V2_HEADER_SIZE + size
 
 
