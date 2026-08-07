@@ -152,16 +152,71 @@ def test_ffmpeg_native_encoder_does_not_produce_false_gapless_values():
 
 
 REGRESSION_FIXTURES = Path(__file__).parent / "fixtures" / "regression"
-
-
-@pytest.mark.parametrize(
-    "regression_file",
-    sorted(REGRESSION_FIXTURES.glob("*.bin")) if REGRESSION_FIXTURES.exists() else [],
-    ids=lambda p: p.name,
+_REGRESSION_FILES = sorted(REGRESSION_FIXTURES.glob("*.bin"))
+# An empty glob here used to silently parametrize to zero cases, which
+# pytest reports as a skip rather than a failure -- so a corpus that
+# regressed to empty (e.g. a bad merge) would go unnoticed forever instead
+# of failing the suite. Asserting here, at collection time, turns that into
+# a loud collection error instead.
+assert _REGRESSION_FILES, (
+    f"No .bin fixtures found under {REGRESSION_FIXTURES} -- the regression corpus must not be "
+    "empty (see its README for what belongs here and why)."
 )
-def test_regression_corpus_does_not_crash(regression_file):
-    with contextlib.suppress(waxcut.UnsupportedMp3Error):
-        waxcut.scan_frames(regression_file.read_bytes())
+
+# A sentinel meaning "this call is expected to succeed, not raise" -- as
+# opposed to a dict value of an actual exception type below.
+_SUCCEEDS = object()
+
+# Per-fixture expected outcome at each API layer, where known -- see
+# tests/fixtures/regression/README.md for what each targets and why.
+# scan_frames alone never touches Xing/VBR-header parsing (that only
+# happens in load_audio_stream), so a fixture can legitimately succeed at
+# the scan_frames layer and only raise once load_audio_stream inspects the
+# VBR header frame -- that's why the two dicts differ.
+_SCAN_FRAMES_EXPECTATIONS: dict[str, type[Exception] | object] = {
+    "truncated_id3v2_tag.bin": waxcut.UnsupportedMp3Error,
+    "truncated_vbr_flags_word.bin": _SUCCEEDS,
+    "vbr_header_only_no_audio.bin": _SUCCEEDS,
+    "frame_length_past_eof.bin": waxcut.UnsupportedMp3Error,
+    "adversarial_0xff_no_sync.bin": waxcut.UnsupportedMp3Error,
+}
+_LOAD_AUDIO_STREAM_EXPECTATIONS: dict[str, type[Exception] | object] = dict.fromkeys(
+    _SCAN_FRAMES_EXPECTATIONS, waxcut.UnsupportedMp3Error
+)
+
+
+def _assert_matches_expectation(call, expected):
+    if expected is _SUCCEEDS:
+        call()
+    elif expected is None:
+        # No specific claim for this fixture -- the smoke-test minimum:
+        # parsing it must raise nothing but UnsupportedMp3Error (which
+        # FileTooLargeError, also acceptable, is itself a subclass of).
+        with contextlib.suppress(waxcut.UnsupportedMp3Error):
+            call()
+    else:
+        with pytest.raises(expected):
+            call()
+
+
+@pytest.mark.parametrize("regression_file", _REGRESSION_FILES, ids=lambda p: p.name)
+def test_regression_corpus_does_not_crash(regression_file, tmp_path):
+    data = regression_file.read_bytes()
+    _assert_matches_expectation(
+        lambda: waxcut.scan_frames(data),
+        _SCAN_FRAMES_EXPECTATIONS.get(regression_file.name),
+    )
+
+    # Also run every fixture through load_audio_stream, the same on-disk
+    # entry point a real caller would use -- several fixtures here only
+    # exercise their target code path there (VBR-header/gapless-tag
+    # parsing), not in scan_frames alone.
+    copied = tmp_path / regression_file.name
+    copied.write_bytes(data)
+    _assert_matches_expectation(
+        lambda: waxcut.load_audio_stream(copied),
+        _LOAD_AUDIO_STREAM_EXPECTATIONS.get(regression_file.name),
+    )
 
 
 def test_split_at_matches_manual_frame_index_at_and_slice_bytes(fixture_path):
