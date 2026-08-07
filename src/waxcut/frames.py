@@ -587,6 +587,86 @@ def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) 
     return delay, padding
 
 
+def _parse_candidate_frame(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVersion, int, int] | None:
+    """(version, sample_rate, length) for a valid, in-bounds frame at offset, else None.
+
+    Combines _parse_header's header validation with _frame_length's length
+    check into one candidate/reject decision, so scan_frames' "candidate
+    rejected, advance and retry" logic doesn't need to be duplicated for
+    each of the two ways a candidate can fail.
+    """
+    parsed = _parse_header(data, offset)
+    if parsed is None:
+        return None
+    version, bitrate, sample_rate, padding = parsed
+    length = _frame_length(version, bitrate, sample_rate, padding)
+    if length <= 0 or offset + length > len(data):
+        return None
+    return version, sample_rate, length
+
+
+def _confirm_first_frame(data: bytes | mmap.mmap, offset: int, length: int) -> bool:
+    """Whether a first-frame candidate is followed by a second real sync, or EOF.
+
+    A sync-mask match plus valid version/layer/bitrate/sample-rate bits occurs
+    by chance in arbitrary binary roughly every few hundred KB, and can be
+    planted deliberately for free. Only the FIRST frame needs this check --
+    its header seeds sample_rate and every other frame's start_ms for the
+    whole scan, so a spurious match there corrupts everything downstream;
+    a spurious match after real audio has already started doesn't have that
+    blast radius and isn't worth the extra _parse_header call per frame.
+    """
+    next_offset = offset + length
+    return next_offset >= len(data) or _parse_header(data, next_offset) is not None
+
+
+def _finalize_scan(
+    raw_frames: tuple[array[int], array[int], array[float], array[float]],
+    first_candidate: tuple[int, int, MpegVersion, int] | None,
+    resync_cap_hit: bool,
+) -> Frames:
+    """Apply the first_candidate fallback if nothing was confirmed, then raise or return.
+
+    first_candidate is the first first-frame candidate scan_frames found that
+    _confirm_first_frame couldn't confirm (see its docstring) -- a genuine
+    single-frame file followed only by a short, non-frame trailer (an ID3v1/
+    APE tag) looks exactly like an unconfirmable first frame too, so if
+    nothing better ever turns up, this fallback is what gets returned rather
+    than reporting no audio found at all.
+    """
+    offsets, lengths, start_ms_values, duration_ms_values = raw_frames
+    if not offsets and first_candidate is not None:
+        offset, length, version, sample_rate = first_candidate
+        samples = _SAMPLES_PER_FRAME[version]
+        offsets.append(offset)
+        lengths.append(length)
+        start_ms_values.append(0.0)
+        duration_ms_values.append(samples / sample_rate * 1000)
+
+    if not offsets:
+        if resync_cap_hit:
+            raise UnsupportedMp3Error(
+                f"No valid MPEG audio frame found in {_MAX_TOTAL_RESYNC_FAILURES} "
+                "total failed resync attempts; giving up rather than scanning "
+                "the rest of the input."
+            )
+        raise UnsupportedMp3Error("No valid MPEG audio frames found.")
+    if resync_cap_hit:
+        # Frames were found, but the scan gave up before reaching the end of
+        # `data` -- unlike genuine EOF (find() returning -1), this means
+        # there may be more real audio after the point the scan abandoned,
+        # discarded silently unless the caller is told. See scan_frames'
+        # own Raises: docstring for the full rationale.
+        warnings.warn(
+            f"scan_frames stopped after {_MAX_TOTAL_RESYNC_FAILURES} total failed "
+            f"resync attempts, before reaching the end of the input -- returning "
+            f"the {len(offsets)} frame(s) found so far; any audio after the point "
+            "the scan gave up is not included.",
+            stacklevel=3,
+        )
+    return Frames(offsets, lengths, start_ms_values, duration_ms_values)
+
+
 def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Frames:
     """Scan raw MP3 bytes and return every located frame, in order.
 
@@ -614,7 +694,13 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
         raises TypeError) the same way list[Frame] does, but is backed by
         compact packed arrays rather than one Python object per frame, and
         compares by identity rather than value (see the Frames class
-        docstring for both caveats in full).
+        docstring for both caveats in full). The first frame is confirmed
+        by a second real sync immediately after it (or EOF) before being
+        trusted, since its header seeds sample_rate and every other
+        frame's start_ms for the whole result -- a syntactically valid
+        4-byte header can occur by chance in arbitrary binary, and a
+        false lock there would otherwise corrupt those values silently.
+        Frames after the first are not re-confirmed this way.
 
     Raises:
         UnsupportedMp3Error: No valid MPEG-1/2/2.5 Layer III frame was
@@ -647,6 +733,9 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
     cursor_ms = 0.0
     total_resync_failures = 0
     resync_cap_hit = False
+    # The first first-frame candidate that _confirm_first_frame couldn't
+    # confirm -- a fallback of last resort, see _finalize_scan's docstring.
+    first_candidate: tuple[int, int, MpegVersion, int] | None = None
 
     def _resync_failed() -> bool:
         # Called on every failed resync attempt (a candidate 0xFF byte
@@ -680,19 +769,21 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
         if offset == -1:
             break
 
-        parsed = _parse_header(data, offset)
-        if parsed is None:
-            # 0xFF matched but the rest of the header didn't -- a coincidental
-            # byte, not a real sync. Advance one byte and keep scanning.
+        candidate = _parse_candidate_frame(data, offset)
+        if candidate is None:
+            # 0xFF matched but the rest of the header (or the length it
+            # implies) didn't -- a coincidental byte, not a real sync.
+            # Advance one byte and keep scanning.
             offset += 1
             if _resync_failed():
                 resync_cap_hit = True
                 break
             continue
+        version, sample_rate, length = candidate
 
-        version, bitrate, sample_rate, padding = parsed
-        length = _frame_length(version, bitrate, sample_rate, padding)
-        if length <= 0 or offset + length > len(data):
+        if not offsets and not _confirm_first_frame(data, offset, length):
+            if first_candidate is None:
+                first_candidate = (offset, length, version, sample_rate)
             offset += 1
             if _resync_failed():
                 resync_cap_hit = True
@@ -718,28 +809,8 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
         cursor_ms += duration_ms
         offset += length
 
-    if not offsets:
-        if resync_cap_hit:
-            raise UnsupportedMp3Error(
-                f"No valid MPEG audio frame found in {_MAX_TOTAL_RESYNC_FAILURES} "
-                "total failed resync attempts; giving up rather than scanning "
-                "the rest of the input."
-            )
-        raise UnsupportedMp3Error("No valid MPEG audio frames found.")
-    if resync_cap_hit:
-        # Frames were found, but the scan gave up before reaching the end of
-        # `data` -- unlike genuine EOF (find() returning -1), this means
-        # there may be more real audio after the point the scan abandoned,
-        # discarded silently unless the caller is told. See scan_frames'
-        # own Raises: docstring for the full rationale.
-        warnings.warn(
-            f"scan_frames stopped after {_MAX_TOTAL_RESYNC_FAILURES} total failed "
-            f"resync attempts, before reaching the end of the input -- returning "
-            f"the {len(offsets)} frame(s) found so far; any audio after the point "
-            "the scan gave up is not included.",
-            stacklevel=2,
-        )
-    return Frames(offsets, lengths, start_ms_values, duration_ms_values)
+    raw_frames = (offsets, lengths, start_ms_values, duration_ms_values)
+    return _finalize_scan(raw_frames, first_candidate, resync_cap_hit)
 
 
 def total_duration_ms(frames: Sequence[Frame]) -> float:

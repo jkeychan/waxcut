@@ -590,3 +590,60 @@ def test_load_audio_stream_use_mmap_split_output_matches_non_mmap(fixture_path):
         normal_first_half = waxcut.slice_bytes(normal.data, normal.frames, 0, cut_idx)
         assert mmap_first_half == normal_first_half
         assert isinstance(mmap_first_half, bytes)
+
+
+def _mpeg1_stereo_128kbps_frame() -> bytes:
+    """A complete (header + zero-filled body), valid MPEG1/128kbps/44100Hz/stereo frame."""
+    header = _mpeg1_stereo_128kbps_header(protection_bit=1)
+    frame_length = 417  # 144 * 128000 / 44100, truncated, no padding
+    return header + b"\x00" * (frame_length - len(header))
+
+
+def test_scan_frames_rejects_a_spurious_sync_before_real_audio(tmp_path):
+    # C3 regression: scan_frames accepted the very first candidate frame
+    # the instant its own 4 header bytes validated, without confirming a
+    # second real sync followed it -- a syntactically valid 4-byte header
+    # occurs by chance in arbitrary binary every few hundred KB and can be
+    # planted deliberately. A crafted MPEG2.5/8kbps/8000Hz header (72-byte
+    # claimed frame length) prepended to real MPEG1 audio made the whole
+    # file's reported sample_rate wrong by 5.5x and silently dropped the
+    # real first frame (its bytes fell inside the fake frame's claimed
+    # span). The first frame must now be confirmed by a second real sync
+    # immediately after it (or EOF) before being trusted.
+    fake_header = bytes.fromhex("ffe31400")
+    real_audio = _mpeg1_stereo_128kbps_frame() * 5
+
+    crafted = tmp_path / "crafted.mp3"
+    crafted.write_bytes(fake_header + real_audio)
+    honest = tmp_path / "honest.mp3"
+    honest.write_bytes(real_audio)
+
+    crafted_stream = waxcut.load_audio_stream(crafted)
+    honest_stream = waxcut.load_audio_stream(honest)
+
+    assert crafted_stream.sample_rate == honest_stream.sample_rate == 44100
+    assert len(crafted_stream.frames) == len(honest_stream.frames) == 5
+    crafted_whole = waxcut.slice_bytes(crafted_stream.data, crafted_stream.frames, 0, 5)
+    honest_whole = waxcut.slice_bytes(honest_stream.data, honest_stream.frames, 0, 5)
+    assert crafted_whole == honest_whole
+
+    raw = waxcut.scan_frames(crafted.read_bytes())
+    assert raw[0].offset == len(fake_header)  # locked onto the real frame, not the fake one
+
+
+def test_scan_frames_still_accepts_a_genuine_single_frame_with_a_trailer(tmp_path):
+    # Companion to the above: the confirmation check must not reject a
+    # genuine single-frame file just because nothing after it looks like a
+    # second MPEG header -- a real single-frame MP3 followed only by a
+    # short, non-frame trailer (an ID3v1 tag, in this construction) looks
+    # exactly like an unconfirmable first frame too. Must still recover
+    # the one real frame rather than reporting no audio found at all.
+    single_frame = _mpeg1_stereo_128kbps_frame()
+    id3v1_trailer = b"TAG" + b"\x00" * 125
+
+    synthetic_mp3 = tmp_path / "single_plus_trailer.mp3"
+    synthetic_mp3.write_bytes(single_frame + id3v1_trailer)
+
+    stream = waxcut.load_audio_stream(synthetic_mp3)
+    assert len(stream.frames) == 1
+    assert stream.sample_rate == 44100
