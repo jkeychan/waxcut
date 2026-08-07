@@ -23,10 +23,10 @@ jobs:
 
       - name: Install zizmor
         id: install-zizmor
-        uses: jaxxstorm/action-install-gh-release@25e24d2d23ae098373794ef1d6faecb48ee52da8
+        uses: jaxxstorm/action-install-gh-release@25e24d2d23ae098373794ef1d6faecb48ee52da8 # v3.0.0
         with:
           repo: zizmorcore/zizmor
-          tag: latest
+          tag: v1.29.0
 
       - name: Run zizmor
         id: run-zizmor
