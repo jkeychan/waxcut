@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 
+from waxcut.frames import WaxcutError
+
 # Optional leading "-" is allowed through so a negative minutes field still
 # reaches the dedicated "invalid minutes field" range check below instead of
 # being misreported as non-numeric.
@@ -24,7 +26,7 @@ _MAX_FRAME_FIELD = _CD_FRAMES_PER_SECOND  # exclusive upper bound: valid range i
 _MAX_MINUTES_FIELD = 1_000_000  # inclusive upper bound: keeps the ms conversion within float range
 
 
-class CueSheetError(ValueError):
+class CueSheetError(WaxcutError):
     """Raised when cue-sheet text can't be parsed into cut-point timestamps.
 
     Covers malformed MM:SS:FF timestamps, a TRACK with no INDEX 01, cue

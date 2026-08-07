@@ -6,6 +6,11 @@ import pytest
 
 import waxcut
 from waxcut.cue import CueSheetError, _parse_msf
+from waxcut.frames import WaxcutError
+
+
+def test_cue_sheet_error_is_a_waxcut_error():
+    assert issubclass(CueSheetError, WaxcutError)
 
 
 @pytest.mark.parametrize(
