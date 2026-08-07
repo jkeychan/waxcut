@@ -60,7 +60,7 @@ jobs:
           GIT_STORE_BRANCH: main
           GIT_STORE_BRANCH_COVERAGE: gh-pages
           REPORT_UNREPRODUCIBLE_CRASHES: "false"
-          OUTPUT_SARIF: "true"
+          OUTPUT_SARIF: "false"
           MINIMIZE_CRASHES: "false"
           CFL_PLATFORM: github
           PARALLEL_FUZZING: "false"
