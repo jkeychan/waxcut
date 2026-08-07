@@ -707,13 +707,19 @@ def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int
 
     Returns:
         The raw bytes for that frame range. Empty bytes if
-        `start_idx >= end_idx`. This output is itself a decodable MP3
-        stream (no container/ID3 wrapper), byte-identical to the
-        corresponding span of the original file.
+        `start_idx >= end_idx` -- including when both are equally far out
+        of range for `frames` (e.g. start_idx=len(frames)+1,
+        end_idx=len(frames)+1): this check runs before either index is
+        used to index into `frames`, so an empty range never raises even
+        if its indices wouldn't be valid on their own. This output is
+        itself a decodable MP3 stream (no container/ID3 wrapper),
+        byte-identical to the corresponding span of the original file.
 
     Raises:
         ValueError: `frames` is empty.
-        IndexError: `start_idx` or `end_idx` is out of range for `frames`.
+        IndexError: `start_idx` or `end_idx` is negative, or a non-empty
+            range (`start_idx < end_idx`) reaches an index out of range
+            for `frames`.
     """
     if not frames:
         raise ValueError("slice_bytes() requires a non-empty frame list")
