@@ -72,7 +72,19 @@ _VBR_HEADER_TAGS = (b"Xing", b"Info", b"VBRI")
 _VBRI_FIXED_OFFSET = 36
 
 
-class UnsupportedMp3Error(ValueError):
+class WaxcutError(ValueError):
+    """Common base for every exception this package raises on purpose.
+
+    Lets a caller catch every waxcut-specific error with one `except
+    WaxcutError` rather than needing to know about each individual
+    exception tree (UnsupportedMp3Error's, CueSheetError's, ...)
+    separately. Still a ValueError subclass, so existing `except
+    ValueError` handlers written before this base class existed keep
+    working unchanged.
+    """
+
+
+class UnsupportedMp3Error(WaxcutError):
     """Raised when frame parsing can't make sense of the input.
 
     This covers both "not an MP3 at all" (no valid Layer III sync found)

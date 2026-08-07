@@ -100,6 +100,10 @@ def test_id3v2_size_includes_footer_when_flag_set():
     assert waxcut.id3v2_size(header + b"12345" + b"rest") == 25
 
 
+def test_unsupported_mp3_error_is_a_waxcut_error():
+    assert issubclass(waxcut.UnsupportedMp3Error, waxcut.WaxcutError)
+
+
 def test_unsupported_file_raises():
     with pytest.raises(waxcut.UnsupportedMp3Error):
         waxcut.scan_frames(b"this is not an mp3 file at all")
