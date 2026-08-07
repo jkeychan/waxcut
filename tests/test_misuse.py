@@ -320,3 +320,31 @@ def test_load_audio_stream_mmap_garbage_input_closes_file_and_mmap_on_parse_fail
 
     assert captured["file_handle"].closed
     assert captured["mmap"].closed
+
+
+def test_load_audio_stream_mmap_closes_file_handle_on_keyboard_interrupt(monkeypatch):
+    # KeyboardInterrupt isn't an Exception subclass, so an `except
+    # Exception` guard around mmap.mmap() never runs and the file handle
+    # leaks -- regression test for the try/finally fix. Spying on Path.open
+    # to hold a strong reference is necessary for the same reason as the
+    # parse-failure test above: without it, GC closing the handle via
+    # __del__ as soon as load_audio_stream's locals go out of scope would
+    # make a naive check pass even with the fix reverted.
+    captured: dict[str, object] = {}
+    real_open = Path.open
+
+    def spy_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        captured["file_handle"] = handle
+        return handle
+
+    def raising_mmap(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    monkeypatch.setattr(mmap, "mmap", raising_mmap)
+
+    with pytest.raises(KeyboardInterrupt):
+        waxcut.load_audio_stream(FIXTURES / "cbr_stereo.mp3", use_mmap=True)
+
+    assert captured["file_handle"].closed

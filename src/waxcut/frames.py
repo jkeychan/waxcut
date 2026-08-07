@@ -885,11 +885,18 @@ def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStrea
         # Not opened via `with`: this handle is kept open for AudioStream's
         # lifetime and released via AudioStream.close().
         file_handle = path.open("rb")
+        mmap_created = False
         try:
             data = mmap.mmap(file_handle.fileno(), 0, access=mmap.ACCESS_READ)
-        except Exception:
-            file_handle.close()
-            raise
+            mmap_created = True
+        finally:
+            # try/finally rather than except Exception: a KeyboardInterrupt
+            # during mmap.mmap() isn't an Exception subclass, so an except
+            # Exception clause wouldn't run this cleanup and the fd would
+            # leak. finally runs on every exit path except success, where
+            # mmap_created is already True and this is a no-op.
+            if not mmap_created:
+                file_handle.close()
     else:
         data = path.read_bytes()
 
