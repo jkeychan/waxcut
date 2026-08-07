@@ -174,7 +174,10 @@ class Frames(Sequence["Frame"]):
         view._start_ms = base._start_ms
         view._duration_ms = base._duration_ms
         view._start = start
-        view._stop = stop
+        # A reversed slice (frames[5:2]) would otherwise give a negative
+        # __len__, which CPython rejects with ValueError -- clamp to an
+        # empty view, matching what list does for the same slice.
+        view._stop = max(start, stop)
         view._start_ms_bias = start_ms_bias
         return view
 
@@ -384,7 +387,12 @@ def _vbr_header_tag_offset(data: bytes | mmap.mmap, frame: Frame, version: MpegV
     side_info = _SIDE_INFO_SIZE[(version, _is_mono(header))]
     crc = _CRC_SIZE if _has_crc(header) else 0
     tag_start = 4 + crc + side_info
-    if frame.offset + tag_start + 4 > len(data):
+    # A Xing/Info/VBRI tag lives inside its own frame, so bound the probe by
+    # the frame's end as well as the buffer's: bytes past frame.offset +
+    # frame.length belong to whatever follows (another frame, a trailer, or
+    # nothing at all near EOF) and must not be read as this frame's tag.
+    tag_limit = min(len(data), frame.offset + frame.length)
+    if frame.offset + tag_start + 4 > tag_limit:
         return None
     tag = data[frame.offset + tag_start : frame.offset + tag_start + 4]
     return tag_start if tag in _VBR_HEADER_TAGS else None
@@ -397,6 +405,19 @@ _TWELVE_BIT_FIELD_LIMIT = 4096
 def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
     """Extract (encoder_delay_samples, encoder_padding_samples) from a LAME extension tag, if present."""
     pos = frame.offset + tag_offset
+    # The LAME extension lives inside the same frame as the Xing/Info tag
+    # that precedes it, so bound reads by the frame's end as well as the
+    # buffer's — same reasoning as _vbr_header_tag_offset. Without this,
+    # bytes past frame.offset + frame.length belong to whatever follows
+    # (another frame, a trailer, or nothing at all near EOF) and would be
+    # misread as this frame's gapless data instead of just failing to parse.
+    tag_limit = min(len(data), frame.offset + frame.length)
+    # The tag's own 4 bytes plus the 4-byte flags word that follows them.
+    # _vbr_header_tag_offset only guarantees the tag itself is present, so
+    # this must be checked here or the unpack below raises a raw
+    # struct.error out of the public API on a truncated/crafted file.
+    if pos + 8 > tag_limit:
+        return None
     flags = struct.unpack_from(">I", data, pos + 4)[0]
     pos += 8
     for flag_bit, size in ((0b0001, 4), (0b0010, 4), (0b0100, 100), (0b1000, 4)):
@@ -404,7 +425,7 @@ def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) 
             pos += size
 
     lame_start = pos
-    if lame_start + 24 > len(data):
+    if lame_start + 24 > tag_limit:
         return None
     version_string = data[lame_start : lame_start + 9]
     # Only genuine LAME encodes reliably populate the extended gapless
@@ -800,19 +821,32 @@ def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
         stream: An AudioStream from load_audio_stream.
         timestamps_ms: Desired cut points, in milliseconds. Need not be
             sorted or in range — each is passed through frame_index_at,
-            which clamps out-of-range values, so an out-of-order or
-            duplicate timestamp simply produces an empty segment at that
-            position rather than raising.
+            which clamps out-of-range values, and the resulting frame
+            indices are then sorted, so unsorted input is normalized to
+            ascending cut points rather than producing overlapping (and
+            therefore audio-duplicating) segments. A duplicate timestamp,
+            or two timestamps landing on the same frame, still yields an
+            empty segment between them.
 
     Returns:
-        A list of len(timestamps_ms) + 1 byte segments, in order. Each
+        A list of len(timestamps_ms) + 1 byte segments, in ascending time
+        order. The count only ever depends on how many timestamps were
+        passed — sorting reorders where the cuts land, never how many
+        segments come back — but the segments are ordered by position in
+        the stream, not by the order the timestamps were given in. Each
         segment is a standalone, decodable MP3 stream, byte-identical to
         the corresponding span of stream.data. Concatenating all segments
-        (see join_frames) reproduces the original audio exactly. Each
-        segment is fresh, independent bytes — safe to use even after
-        closing an mmap-backed stream (see AudioStream.close()).
+        (see join_frames) reproduces the original audio exactly, for any
+        input order. Each segment is fresh, independent bytes — safe to
+        use even after closing an mmap-backed stream (see
+        AudioStream.close()).
     """
-    idxs = [0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)]
+    # Sorted so the pairwise ranges below are non-overlapping: unsorted
+    # indices would pair into ranges that revisit the same frames, and
+    # join_frames on those segments would duplicate audio rather than
+    # reproduce the original. frame_index_at still runs against each
+    # timestamp as given -- only the resulting indices are sorted.
+    idxs = sorted([0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)])
     return [slice_bytes(stream.data, stream.frames, start, end) for start, end in pairwise(idxs)]
 
 

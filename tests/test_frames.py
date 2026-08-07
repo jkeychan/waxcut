@@ -146,11 +146,65 @@ def test_split_at_no_timestamps_returns_whole_stream_as_one_segment(fixture_path
     assert segment == waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
 
 
-def test_split_at_out_of_order_timestamps_produces_empty_segment(fixture_path):
+def test_split_at_duplicate_timestamps_produce_an_empty_segment(fixture_path):
+    stream = waxcut.load_audio_stream(fixture_path)
+    midpoint = stream.playable_duration_ms / 2
+    segments = waxcut.split_at(stream, [midpoint, midpoint])
+    assert len(segments) == 3
+    assert segments[1] == b""
+
+
+def test_split_at_sorts_out_of_order_timestamps_instead_of_duplicating_audio(fixture_path):
+    # Unsorted cut points used to build overlapping index ranges, so the
+    # segments covered some frames twice and join_frames produced a stream
+    # longer than the original instead of reproducing it.
     stream = waxcut.load_audio_stream(fixture_path)
     duration = stream.playable_duration_ms
-    segments = waxcut.split_at(stream, [duration * 0.75, duration * 0.25])
-    assert segments[1] == b""
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+
+    reversed_order = waxcut.split_at(stream, [duration * 0.75, duration * 0.25])
+    ascending = waxcut.split_at(stream, [duration * 0.25, duration * 0.75])
+
+    assert waxcut.join_frames(reversed_order) == whole
+    assert sum(len(segment) for segment in reversed_order) == len(whole)
+    # Input order only decides where the cuts land, never how many segments
+    # come back, and the result is always in ascending stream order.
+    assert len(reversed_order) == 3
+    assert reversed_order == ascending
+
+
+def test_split_at_normalizes_every_ordering_of_several_timestamps(fixture_path):
+    # Two cut points can only be ordered or reversed, so a fix that merely
+    # reverses a backwards pair satisfies the two-timestamp case above while
+    # still building overlapping ranges for input that is unsorted in the
+    # middle. Every permutation of three cut points must give byte-identical
+    # segments, and each must still rejoin into exactly the original.
+    stream = waxcut.load_audio_stream(fixture_path)
+    duration = stream.playable_duration_ms
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+    cuts = [duration * 0.25, duration * 0.5, duration * 0.75]
+
+    ascending = waxcut.split_at(stream, cuts)
+    for ordering in itertools.permutations(cuts):
+        segments = waxcut.split_at(stream, list(ordering))
+        assert len(segments) == len(cuts) + 1
+        assert waxcut.join_frames(segments) == whole
+        assert sum(len(segment) for segment in segments) == len(whole)
+        assert segments == ascending
+
+
+def test_split_at_repeated_timestamps_keep_one_segment_per_cut(fixture_path):
+    # Sorting must not collapse equal indices: N identical cut points still
+    # return N + 1 segments, all but the first and last empty.
+    stream = waxcut.load_audio_stream(fixture_path)
+    midpoint = stream.playable_duration_ms / 2
+    whole = waxcut.slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
+
+    segments = waxcut.split_at(stream, [midpoint] * 4)
+
+    assert len(segments) == 5
+    assert segments[1:4] == [b"", b"", b""]
+    assert waxcut.join_frames(segments) == whole
 
 
 def test_join_frames_reverses_split_at(fixture_path):
@@ -212,6 +266,95 @@ def test_lame_gapless_tag_found_when_frame_is_crc_protected(tmp_path):
     stream = waxcut.load_audio_stream(synthetic_mp3)
     assert stream.encoder_delay_samples == delay
     assert stream.encoder_padding_samples == padding
+
+
+def _mpeg2_stereo_8kbps_header(*, sample_rate_idx: int) -> bytes:
+    """A valid MPEG2 Layer III, 8kbps, stereo, CRC-free frame header.
+
+    The smallest frames the format allows -- short enough that a Xing tag
+    sits near the very end of the frame, which is what makes the truncated
+    reads below reachable at all.
+    """
+    sync = 0x7FF << 21
+    version = 0b10 << 19  # MPEG2
+    layer = 0b01 << 17  # Layer III
+    protection = 1 << 16  # no CRC
+    bitrate_idx = 1 << 12  # 8kbps
+    channel_mode = 0b00 << 6  # stereo
+    header = sync | version | layer | protection | bitrate_idx | (sample_rate_idx << 10) | channel_mode
+    return struct.pack(">I", header)
+
+
+def test_truncated_xing_flags_word_raises_unsupported_not_struct_error(tmp_path):
+    # 8kbps @ 22050Hz gives a 26-byte frame; the Xing tag starts at byte 21
+    # (4 header + 17 side info), so the tag itself fits but the 4-byte flags
+    # word that follows it runs past EOF. Reading it unguarded leaked a raw
+    # struct.error out of load_audio_stream.
+    frame = _mpeg2_stereo_8kbps_header(sample_rate_idx=0b00) + b"\x00" * 17 + b"Xing"
+    frame += b"\x00" * (26 - len(frame))
+    assert len(frame) == 26
+
+    truncated = tmp_path / "truncated_xing.mp3"
+    truncated.write_bytes(frame)
+
+    with pytest.raises(waxcut.UnsupportedMp3Error):
+        waxcut.load_audio_stream(truncated)
+
+
+def test_vbr_tag_straddling_the_frame_end_is_not_treated_as_a_vbr_header(tmp_path):
+    # 8kbps @ 24000Hz gives a 24-byte frame, so the 4-byte probe at offset 21
+    # runs one byte past the frame's own end. Bounding that probe against the
+    # whole buffer instead of the frame let trailing bytes complete a "Xing"
+    # that isn't in this frame at all -- and the real audio frame was then
+    # discarded as encoder metadata.
+    frame = _mpeg2_stereo_8kbps_header(sample_rate_idx=0b01) + b"\x00" * 17 + b"Xin"
+    assert len(frame) == 24
+    straddling = tmp_path / "straddling_tag.mp3"
+    straddling.write_bytes(frame + b"g" + b"\x00" * 40)  # trailing junk completes "Xing"
+
+    stream = waxcut.load_audio_stream(straddling)
+    assert len(stream.frames) == 1
+    assert stream.frames[0].offset == 0
+
+
+def test_lame_gapless_tag_past_frame_end_is_not_read(tmp_path):
+    # Same 26-byte MPEG2/stereo/8kbps/22050Hz/no-CRC geometry as the
+    # straddling-tag test above: the Xing tag (offset 21, 4 bytes) fits
+    # entirely inside the frame, but the LAME extension that follows it
+    # (flags word + "LAME" version string + delay/padding) does not -- it
+    # needs 32 more bytes than the 1 remaining in the frame. Bounding the
+    # read against the whole buffer instead of the frame let bytes from
+    # this junk region (and potentially a second real frame) be read and
+    # decoded as if they were this frame's gapless delay/padding.
+    frame_one = _mpeg2_stereo_8kbps_header(sample_rate_idx=0b00) + b"\x00" * 17 + b"Xing"
+    frame_one += b"\x00" * (26 - len(frame_one))
+    assert len(frame_one) == 26
+
+    flags = b"\x00\x00\x00\x00"  # combines with frame_one's last byte to read as flags=0
+    version_string = b"LAME3.100"
+    unused = b"\x00" * (21 - len(version_string))
+    delay, padding = 321, 654
+    delay_padding = bytes(
+        [
+            (delay >> 4) & 0xFF,
+            ((delay & 0xF) << 4) | ((padding >> 8) & 0xF),
+            padding & 0xFF,
+        ]
+    )
+    # This junk sits entirely past frame_one's end (offset 26+), shaped so a
+    # buggy read bounded only by len(data) would decode it as a genuine LAME
+    # gapless tag -- exactly the bytes _parse_lame_gapless must not reach.
+    junk = flags[1:] + version_string + unused + delay_padding
+
+    frame_two = _mpeg2_stereo_8kbps_header(sample_rate_idx=0b00) + b"\x00" * 22
+    assert len(frame_two) == 26
+
+    crafted = tmp_path / "lame_tag_past_frame_end.mp3"
+    crafted.write_bytes(frame_one + junk + frame_two)
+
+    stream = waxcut.load_audio_stream(crafted)
+    assert stream.encoder_delay_samples == 0
+    assert stream.encoder_padding_samples == 0
 
 
 def test_load_audio_stream_use_mmap_produces_identical_frames(fixture_path):

@@ -230,14 +230,20 @@ timestamps in one call, instead of looping manually.
 **Args**
 - `stream` (`AudioStream`) — from `load_audio_stream`.
 - `timestamps_ms` (`list[float]`) — desired cut points, in milliseconds.
-  Need not be sorted or in range — each is clamped by `frame_index_at`, so
-  an out-of-order or duplicate timestamp simply produces an empty segment
-  at that position rather than raising.
+  Need not be sorted or in range — each is clamped by `frame_index_at`,
+  and the resulting frame indices are then sorted, so unsorted input is
+  normalized to ascending cut points rather than raising. A duplicate
+  timestamp, or two timestamps landing on the same frame, still produces
+  an empty segment between them.
 
 **Returns**
-- `list[bytes]` — `len(timestamps_ms) + 1` segments, in order. Each is a
-  standalone, decodable MP3 stream. Concatenating all of them (see
-  [`join_frames`](#join_frames)) reproduces the original audio exactly.
+- `list[bytes]` — `len(timestamps_ms) + 1` segments, in ascending time
+  order. The count only depends on how many timestamps were passed —
+  sorting reorders where the cuts land, never how many segments come back
+  — but the segments follow position in the stream, not the order the
+  timestamps were given in. Each is a standalone, decodable MP3 stream.
+  Concatenating all of them (see [`join_frames`](#join_frames)) reproduces
+  the original audio exactly, for any input order.
 
 ## `join_frames`
 
