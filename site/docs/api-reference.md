@@ -4,8 +4,10 @@ sidebar_position: 3
 
 # API Reference
 
-The full public surface of `waxcut` — everything in `waxcut.__all__`. All
-names are importable directly from the top-level `waxcut` package.
+The full public surface of `waxcut` — every function and class in
+`waxcut.__all__` (the package version string, `waxcut.__version__`, is the
+one non-callable entry and isn't covered here). All names are importable
+directly from the top-level `waxcut` package.
 
 ## `load_audio_stream`
 
@@ -58,7 +60,7 @@ limits.
 ## `AudioStream`
 
 ```python
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class AudioStream:
     data: bytes | mmap.mmap
     frames: Frames
@@ -71,17 +73,25 @@ A parsed MP3 stream with located frames and gapless metadata. Normally
 constructed via [`load_audio_stream`](#load_audio_stream) rather than
 directly.
 
+**Equality and hashing are identity-based** (`object`'s default) — two
+`AudioStream`s parsed from the same file are not `==`, regardless of
+`use_mmap`. `eq=False` opts out of the field-wise `__eq__`/`__hash__` a
+frozen dataclass generates by default, which would otherwise compare (and
+hash) the full `data` field — reading the entire file on every equality
+check or `hash()` call, while still reporting two independently-parsed
+streams as equal since `data` is the only field capable of comparing equal
+by value in the first place.
+
 **Fields**
 - `data` (`bytes | mmap.mmap`) — the complete file bytes this stream was
   parsed from, or (if loaded with `use_mmap=True`) an `mmap.mmap` view over
   them. Every function in this module that accepts `data` (`scan_frames`,
   `slice_bytes`, etc.) works identically with either.
-- `frames` (`Frames`) — the located frames, in file order, as a
-  memory-compact sequence (see [`Frames`](#frames)) that behaves like
-  `list[Frame]` — indexing, negative indexing, slicing, iteration, `len()`
-  all work the same way. If the source file had a Xing/Info/VBRI VBR header
-  frame, it has already been excluded here, and the remaining frames
-  rebased so the first one has `start_ms == 0`.
+- `frames` (`Frames`) — the located frames, in file order (see
+  [`Frames`](#frames) for exactly which `list[Frame]`-like operations it
+  supports). If the source file had a Xing/Info/VBRI VBR header frame, it
+  has already been excluded here, and the remaining frames rebased so the
+  first one has `start_ms == 0`.
 - `encoder_delay_samples` (`int`) — samples of encoder padding at the start
   of the audio, read from a LAME gapless tag if one was present; `0`
   otherwise. Informational only: it does not affect frame boundaries or
@@ -148,17 +158,29 @@ class Frames(Sequence[Frame])
 ```
 
 The type returned by [`scan_frames`](#scan_frames) and found on
-`AudioStream.frames`. Behaves like `list[Frame]` — `len()`, positive and
-negative indexing, slicing, and iteration all work the same way — but is
-backed by four packed `array.array` buffers rather than one Python object
-per frame: indexing/iterating constructs a [`Frame`](#frame) on demand
-instead of every frame being pre-allocated up front. Measured at ~24
-bytes/frame vs. ~168 bytes/frame for an equivalent `list[Frame]` — see
-[Security](./security.md#resource-limits) for why this matters and the
-real numbers behind it.
+`AudioStream.frames`. Backed by four packed `array.array` buffers rather
+than one Python object per frame: indexing/iterating constructs a
+[`Frame`](#frame) on demand instead of every frame being pre-allocated up
+front. Measured at ~24 bytes/frame vs. ~128 bytes/frame for an equivalent
+`list[Frame]` — see [Security](./security.md#resource-limits) for why this
+matters and the real numbers behind it.
 
-Slicing returns another `Frames` sharing the same backing arrays — it
-never copies. Not constructed directly by callers.
+Supports a specific subset of `list[Frame]` operations, not the full
+interface:
+
+- `len()`, positive and negative indexing (`frames[3]`, `frames[-1]`), and
+  iteration all work the same way as `list[Frame]`.
+- Slicing (`frames[2:5]`) works, but only with a step of `1` — a stepped
+  slice (`frames[::2]`) raises `TypeError`, since real step support for
+  this array-backed view isn't implemented (no caller in this codebase
+  needs it). A slice returns another `Frames` sharing the same backing
+  arrays — it never copies.
+- Equality is **identity-based**, not element-wise: `Frames` doesn't define
+  `__eq__`, so two `Frames` views over the same or equal underlying data are
+  only `==` if they're the same object. This differs from `list[Frame]`,
+  where two lists with equal elements compare equal.
+
+Not constructed directly by callers.
 
 ## `frame_index_at`
 
@@ -190,7 +212,7 @@ last frame index instead of erroring.)
 ## `slice_bytes`
 
 ```python
-def slice_bytes(data: bytes, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes
+def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes
 ```
 
 Returns the raw bytes covering `frames[start_idx:end_idx]` as one
@@ -201,7 +223,7 @@ standalone MP3 stream (no container/ID3 wrapper), byte-identical to the
 corresponding span of the original file.
 
 **Args**
-- `data` (`bytes`) — the same bytes `frames` was derived from.
+- `data` (`bytes | mmap.mmap`) — the same bytes `frames` was derived from.
 - `frames` (`Sequence[Frame]`) — from `scan_frames` or `AudioStream.frames`.
 - `start_idx` (`int`) — first frame index to include (inclusive).
 - `end_idx` (`int`) — one past the last frame index to include (exclusive)
@@ -244,6 +266,40 @@ timestamps in one call, instead of looping manually.
   timestamps were given in. Each is a standalone, decodable MP3 stream.
   Concatenating all of them (see [`join_frames`](#join_frames)) reproduces
   the original audio exactly, for any input order.
+
+## `split_to_files`
+
+```python
+def split_to_files(stream: AudioStream, timestamps_ms: list[float], output_paths: list[Path]) -> None
+```
+
+Same cut-point semantics as [`split_at`](#split_at), but writes each segment
+straight to its own output path via `Path.write_bytes` instead of returning
+them all as one `list[bytes]`. For a stream loaded with `use_mmap=True`,
+this avoids `split_at`'s failure mode of holding every segment (and
+therefore the whole file) in the Python heap at once — each segment is
+written and then eligible for garbage collection before the next one is
+sliced. This is about not accumulating *all* segments at once, not about
+streaming a single segment: each individual segment is still fully
+materialized as one `bytes` object by `slice_bytes` before being written,
+same as `split_at`.
+
+**Args**
+- `stream` (`AudioStream`) — from `load_audio_stream`.
+- `timestamps_ms` (`list[float]`) — desired cut points, in milliseconds.
+  Same sorting/clamping/duplicate-timestamp semantics as
+  [`split_at`](#split_at).
+- `output_paths` (`list[Path]`) — one path per output segment, in ascending
+  stream order (not the order `timestamps_ms` was given in — same
+  reordering `split_at` applies). Must have exactly
+  `len(timestamps_ms) + 1` entries, one per segment `split_at` would have
+  returned. Existing files at these paths are overwritten.
+
+**Returns**
+- `None`
+
+**Raises**
+- `ValueError` — `len(output_paths) != len(timestamps_ms) + 1`.
 
 ## `join_frames`
 
@@ -419,7 +475,7 @@ track.
 ## `scan_frames`
 
 ```python
-def scan_frames(data: bytes, *, max_size: int | None = None) -> Frames
+def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Frames
 ```
 
 Scans `data` for MPEG Layer III audio frames, skipping any leading ID3v2
@@ -438,7 +494,7 @@ from playback/duration is [`load_audio_stream`](#load_audio_stream)'s job,
 not `scan_frames`'s.
 
 **Args**
-- `data` (`bytes`) — raw file bytes.
+- `data` (`bytes | mmap.mmap`) — raw file bytes.
 - `max_size` (`int | None`, keyword-only, default `None`) — maximum
   allowed size in bytes; `None` means the default 250 MB cap.
   [`load_audio_stream`](#load_audio_stream) uses this internally to apply
@@ -459,7 +515,7 @@ not `scan_frames`'s.
 ## `id3v2_size`
 
 ```python
-def id3v2_size(data: bytes) -> int
+def id3v2_size(data: bytes | mmap.mmap) -> int
 ```
 
 Returns the byte length of a leading ID3v2 tag at the start of `data`, or
@@ -467,16 +523,29 @@ Returns the byte length of a leading ID3v2 tag at the start of `data`, or
 syncsafe 4-byte size field and added to the fixed 10-byte header size.
 
 **Args**
-- `data` (`bytes`) — raw file bytes.
+- `data` (`bytes | mmap.mmap`) — raw file bytes.
 
 **Returns**
 - `int` — `0` if no ID3v2 tag is present, otherwise the tag's total size
   in bytes, including its 10-byte header.
 
+## `WaxcutError`
+
+```python
+class WaxcutError(ValueError)
+```
+
+Common base for every exception this package raises on purpose. Catch
+`WaxcutError` to handle any waxcut-specific failure in one place, instead of
+needing to know about [`UnsupportedMp3Error`](#unsupportedmp3error)'s and
+[`CueSheetError`](#cuesheeterror)'s trees separately. Subclasses `ValueError`,
+so an `except ValueError` handler written before this base class existed
+keeps working unchanged.
+
 ## `UnsupportedMp3Error`
 
 ```python
-class UnsupportedMp3Error(ValueError)
+class UnsupportedMp3Error(WaxcutError)
 ```
 
 Raised when frame parsing can't make sense of the input as an MP3. In the
@@ -490,12 +559,12 @@ current implementation this covers two cases:
   only a VBR header frame (Xing/Info/VBRI) with no real audio frames after
   it.
 
-It subclasses `ValueError`.
+Subclasses [`WaxcutError`](#waxcuterror) (and therefore `ValueError`).
 
 ## `CueSheetError`
 
 ```python
-class CueSheetError(ValueError)
+class CueSheetError(WaxcutError)
 ```
 
 Raised when cue-sheet text can't be parsed into cut-point timestamps.
@@ -505,7 +574,7 @@ multi-FILE cue sheets (unsupported — see
 [`parse_cue_sheet`](#parse_cue_sheet)). Always raised with a message naming
 the offending line.
 
-It subclasses `ValueError`.
+Subclasses [`WaxcutError`](#waxcuterror) (and therefore `ValueError`).
 
 ## `FileTooLargeError`
 
@@ -514,8 +583,10 @@ class FileTooLargeError(UnsupportedMp3Error)
 ```
 
 Raised by [`scan_frames`](#scan_frames)/[`load_audio_stream`](#load_audio_stream)
-when input exceeds 250 MB — see [Security](./security.md#resource-limits)
-for why this limit exists. Subclasses `UnsupportedMp3Error` (and therefore
-`ValueError`), so an existing `except UnsupportedMp3Error` handler still
-catches it. It's a distinct class so callers who want to tell "too large"
-apart from "not a valid MP3" can catch it specifically.
+when input exceeds the applicable size limit: 250 MB by default, or 2 GB
+when `load_audio_stream` is called with `use_mmap=True` — see
+[Security](./security.md#resource-limits) for why both limits exist and
+which one a given call is subject to. Subclasses `UnsupportedMp3Error` (and
+therefore `ValueError`), so an existing `except UnsupportedMp3Error` handler
+still catches it. It's a distinct class so callers who want to tell "too
+large" apart from "not a valid MP3" can catch it specifically.
