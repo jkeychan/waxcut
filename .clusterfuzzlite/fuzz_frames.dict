@@ -1,0 +1,14 @@
+# libFuzzer dictionary for fuzz_frames: byte sequences waxcut's MP3 frame
+# parser specifically looks for. See
+# https://llvm.org/docs/LibFuzzer.html#dictionaries for the format.
+
+# MPEG audio frame sync word (11 set bits, followed by the MPEG
+# version/layer bits) — the byte pattern scan_frames looks for when
+# resyncing. 0xFB covers MPEG1 Layer III, the most common case.
+sync_word="\xff\xfb"
+
+id3_tag="ID3"
+xing_tag="Xing"
+info_tag="Info"
+vbri_tag="VBRI"
+lame_tag="LAME"

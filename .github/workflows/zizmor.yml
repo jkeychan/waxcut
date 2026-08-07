@@ -17,7 +17,7 @@ jobs:
       security-events: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -55,7 +55,12 @@ jobs:
           exit "${human_exit}"
 
       - name: Upload SARIF results
-        if: always()
+        # Fork PRs run with a read-only token that can't upload SARIF —
+        # `always()` alone would give the first external contributor a red
+        # required check they have no way to fix. Still upload on any
+        # same-repo failure (push to main, or a PR from a branch in this
+        # repo); skip only when the PR head is a fork.
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: github/codeql-action/upload-sarif@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
         with:
           sarif_file: results.sarif
