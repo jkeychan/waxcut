@@ -12,7 +12,7 @@ directly from the top-level `waxcut` package.
 ## `load_audio_stream`
 
 ```python
-def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream
+def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStream
 ```
 
 Loads an MP3 file and parses it into an [`AudioStream`](#audiostream) ready
@@ -38,7 +38,7 @@ larger 2 GB size cap rather than the 250 MB default. See
 limits.
 
 **Args**
-- `path` (`Path`) — path to an MP3 file on disk.
+- `path` (`Path | str`) — path to an MP3 file on disk.
 - `use_mmap` (`bool`, keyword-only, default `False`) — if `True`,
   memory-map the file instead of reading it into a `bytes` object; see
   above.
@@ -242,7 +242,7 @@ indexing would. Positive out-of-range indices surface as a normal Python
 ## `split_at`
 
 ```python
-def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]
+def split_at(stream: AudioStream, timestamps_ms: Sequence[float]) -> list[bytes]
 ```
 
 Convenience wrapper around [`frame_index_at`](#frame_index_at) +
@@ -251,7 +251,7 @@ timestamps in one call, instead of looping manually.
 
 **Args**
 - `stream` (`AudioStream`) — from `load_audio_stream`.
-- `timestamps_ms` (`list[float]`) — desired cut points, in milliseconds.
+- `timestamps_ms` (`Sequence[float]`) — desired cut points, in milliseconds.
   Need not be sorted or in range — each is clamped by `frame_index_at`,
   and the resulting frame indices are then sorted, so unsorted input is
   normalized to ascending cut points rather than raising. A duplicate
@@ -270,7 +270,7 @@ timestamps in one call, instead of looping manually.
 ## `split_to_files`
 
 ```python
-def split_to_files(stream: AudioStream, timestamps_ms: list[float], output_paths: list[Path]) -> None
+def split_to_files(stream: AudioStream, timestamps_ms: Sequence[float], output_paths: Sequence[Path]) -> None
 ```
 
 Same cut-point semantics as [`split_at`](#split_at), but writes each segment
@@ -286,10 +286,10 @@ same as `split_at`.
 
 **Args**
 - `stream` (`AudioStream`) — from `load_audio_stream`.
-- `timestamps_ms` (`list[float]`) — desired cut points, in milliseconds.
+- `timestamps_ms` (`Sequence[float]`) — desired cut points, in milliseconds.
   Same sorting/clamping/duplicate-timestamp semantics as
   [`split_at`](#split_at).
-- `output_paths` (`list[Path]`) — one path per output segment, in ascending
+- `output_paths` (`Sequence[Path]`) — one path per output segment, in ascending
   stream order (not the order `timestamps_ms` was given in — same
   reordering `split_at` applies). Must have exactly
   `len(timestamps_ms) + 1` entries, one per segment `split_at` would have
@@ -304,7 +304,7 @@ same as `split_at`.
 ## `join_frames`
 
 ```python
-def join_frames(segments: list[bytes]) -> bytes
+def join_frames(segments: Sequence[bytes]) -> bytes
 ```
 
 Concatenates frame-aligned MP3 byte segments back into one stream. Safe
@@ -316,7 +316,7 @@ any trailer aren't carried into split output, so they're absent from a
 rejoin too.
 
 **Args**
-- `segments` (`list[bytes]`) — byte segments to join, in order, as
+- `segments` (`Sequence[bytes]`) — byte segments to join, in order, as
   produced by `slice_bytes` or `split_at`.
 
 **Returns**
@@ -359,11 +359,14 @@ this v2.3 tag.
 - `bytes` — the ID3v2.3 tag followed immediately by `data`.
 
 **Raises**
-- `ValueError` — `track` is given and is less than `1`, `data` already
-  starts with an ID3v2 tag (stacking a second tag on top would corrupt
-  frame scanning, since `scan_frames`/`id3v2_size` only ever skip the
-  outermost tag), or the combined frame payload doesn't fit in a 4-byte
-  ID3v2 syncsafe integer.
+- `ValueError` — `track` is given and is less than `1`; `title`/`artist`
+  contains NUL, CR, or LF (a NUL truncates the field for readers that treat
+  it as a C string terminator, and CR/LF can make stored content differ
+  from what's displayed — rejected rather than silently stripped); `data`
+  already starts with an ID3v2 tag (stacking a second tag on top would
+  corrupt frame scanning, since `scan_frames`/`id3v2_size` only ever skip
+  the outermost tag); or the combined frame payload doesn't fit in a
+  4-byte ID3v2 syncsafe integer.
 
 ## `total_duration_ms`
 
@@ -508,7 +511,13 @@ not `scan_frames`'s.
 - `UnsupportedMp3Error` — no valid MPEG Layer III frame was found anywhere
   in `data`. This covers both non-MP3 input and files containing only
   Layer I/II frames, which this parser doesn't recognize (see
-  [How It Works](./how-it-works.md#why-layer-iii-are-out-of-scope)).
+  [How It Works](./how-it-works.md#why-layer-iii-are-out-of-scope)). Also
+  raised if 2,000,000 consecutive candidate sync bytes each fail header
+  validation with zero frames located yet — input that looks nothing like
+  an MP3 from the start is rejected quickly instead of scanning all the
+  way to `max_size`. If frames were already found before such a streak
+  began, this bound doesn't discard them: `scan_frames` returns those
+  frames instead of raising, the same outcome as data simply running out.
 - `FileTooLargeError` — `data` exceeds `max_size` (250 MB by default). See
   [Security](./security.md#resource-limits).
 
