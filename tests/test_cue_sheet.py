@@ -273,6 +273,22 @@ def test_parse_cue_sheet_rejects_oversized_minutes_field():
         waxcut.parse_cue_sheet(text)
 
 
+def test_parse_cue_sheet_rejects_duplicate_index_01_within_one_track():
+    # Two INDEX 01 lines under one TRACK used to silently append two
+    # timestamps for it instead of being flagged as the malformed input
+    # it is.
+    text = (
+        'FILE "x.mp3" MP3\n'
+        "  TRACK 01 AUDIO\n"
+        "    INDEX 01 00:00:00\n"
+        "  TRACK 02 AUDIO\n"
+        "    INDEX 01 00:05:00\n"
+        "    INDEX 01 00:07:00\n"
+    )
+    with pytest.raises(waxcut.CueSheetError, match="more than one INDEX 01"):
+        waxcut.parse_cue_sheet(text)
+
+
 def test_parse_cue_sheet_rejects_out_of_order_timestamps():
     text = (
         'FILE "x.mp3" MP3\n  TRACK 01 AUDIO\n    INDEX 01 00:05:00\n  TRACK 02 AUDIO\n    INDEX 01 00:03:00\n'

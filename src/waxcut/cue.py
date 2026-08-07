@@ -156,10 +156,11 @@ def parse_cue_sheet(text: str) -> list[float]:
             isn't valid MM:SS:FF (wrong field count, non-numeric fields,
             seconds outside 0-59, or the CD frame field outside 0-74 at
             75 frames/second); an AUDIO track's block ends without ever
-            recording its own INDEX 01; or a later INDEX 01 timestamp is
-            strictly less than the one before it (equal, i.e. duplicate,
-            timestamps are allowed -- split_at already documents that a
-            duplicate timestamp simply yields an empty segment).
+            recording its own INDEX 01; a single AUDIO track has more than
+            one INDEX 01 entry; or a later INDEX 01 timestamp is strictly
+            less than the one before it (equal, i.e. duplicate, timestamps
+            are allowed -- split_at already documents that a duplicate
+            timestamp simply yields an empty segment).
     """
     # A leading BOM survives decoding when a caller uses "utf-8" instead of
     # "utf-8-sig" -- common with real-world .cue files from EAC and other
@@ -202,6 +203,10 @@ def parse_cue_sheet(text: str) -> list[float]:
         elif keyword == "INDEX" and in_audio_track:
             ms = _handle_index_line(line, lineno)
             if ms is not None:
+                if have_index01_for_current_track:
+                    raise CueSheetError(
+                        f"line {lineno}: TRACK {current_track_number} has more than one INDEX 01"
+                    )
                 if timestamps and ms < timestamps[-1]:
                     raise CueSheetError(
                         f"line {lineno}: INDEX 01 timestamps are not increasing "
