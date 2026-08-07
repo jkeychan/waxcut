@@ -62,6 +62,7 @@ __all__ = [
     "Frames",
     "UnsupportedMp3Error",
     "WaxcutError",
+    "__version__",
     "frame_index_at",
     "id3v2_size",
     "join_frames",
