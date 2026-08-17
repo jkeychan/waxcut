@@ -8,7 +8,10 @@ Frame-accurate, lossless MP3 splitting and duration parsing in pure Python —
 no ffmpeg, no subprocess, no decode step.
 
 Cuts are made by parsing the file's own MPEG frame headers and byte-copying
-whole frames: output is bit-identical to the source, just shorter.
+whole frames: output is byte-identical to the corresponding span of the
+source audio frames, just shorter — leading ID3v2 tags, the VBR header
+frame, and any trailer present in the source are not carried into split
+output.
 
 ## Install
 
@@ -38,23 +41,32 @@ Path("part2.mp3").write_bytes(second_half)
 
 ## Splitting into more than two parts
 
-`split_at`/`join_frames` collapse the loop above into one call for N cut
-points:
+`split_at` collapses the loop above into one call for N cut points, and
+`join_frames` is its inverse — concatenating the resulting segments
+reproduces the original audio's frame span exactly (not the original file
+bytes; tags/VBR header/trailer aren't preserved):
 
 ```python
-from waxcut import load_audio_stream, split_at
+from pathlib import Path
+from waxcut import load_audio_stream, split_at, join_frames, slice_bytes
 
 stream = load_audio_stream(Path("mixtape.mp3"))
 parts = split_at(stream, timestamps_ms=[90_000, 180_000, 270_000])
 
 for i, part in enumerate(parts):
     Path(f"part{i}.mp3").write_bytes(part)
+
+# join_frames is the inverse of split_at: reassembling the parts reproduces
+# the source's audio frame span
+assert join_frames(parts) == slice_bytes(stream.data, stream.frames, 0, len(stream.frames))
 ```
 
 ## Tagging split output
 
 `write_id3v2_tag` writes a minimal ID3v2.3 tag (title/artist/track number)
-onto any `bytes` — typically one segment of `split_at`'s output:
+onto untagged `bytes` — typically one segment of `split_at`'s output, which
+never has a leading ID3v2 tag of its own. It refuses to tag data that
+already starts with an ID3v2 tag:
 
 ```python
 from pathlib import Path
@@ -130,28 +142,33 @@ for i, (segment, title) in enumerate(zip(tracks, titles, strict=True), start=1):
     Path(f"track{i:02d}.mp3").write_bytes(tagged)
 ```
 
-## Streaming large files
+## Large files: `use_mmap` and `split_to_files`
 
-`split_at` returns a `list[bytes]` with every segment fully materialized at
-once, so even with `use_mmap=True` (which avoids loading the whole source
-file into memory), a full split pipeline still peaks at roughly the size of
-all segments held simultaneously. For a very large file, loop
-`frame_index_at`/`slice_bytes` directly and write each segment as it's
-produced instead of collecting them all via `split_at` first -- only one
-segment is ever in memory at a time:
+For a multi-hour file, `load_audio_stream(path, use_mmap=True)` avoids
+reading the whole source file into memory (see
+[How It Works](./how-it-works.md#loading-large-files-use_mmap)). Pair it
+with `split_to_files`, which writes each segment straight to its own output
+path instead of returning a `list[bytes]` with every segment held at once:
 
 ```python
 from pathlib import Path
-from waxcut import load_audio_stream, frame_index_at, slice_bytes
+from waxcut import load_audio_stream, split_to_files
 
 with load_audio_stream(Path("huge_mixtape.mp3"), use_mmap=True) as stream:
     cut_points = [90_000, 180_000, 270_000]  # ms
-    indices = [0, *(frame_index_at(stream.frames, t) for t in cut_points), len(stream.frames)]
-    for i, (start, end) in enumerate(zip(indices, indices[1:])):
-        segment = slice_bytes(stream.data, stream.frames, start, end)
-        Path(f"part{i}.mp3").write_bytes(segment)
-        # segment goes out of scope here -- only one segment in memory at a time
+    output_paths = [Path(f"part{i}.mp3") for i in range(len(cut_points) + 1)]
+    split_to_files(stream, cut_points, output_paths)
 ```
+
+This avoids holding *all* segments in memory at once — each is written and
+becomes eligible for garbage collection before the next is cut — but each
+individual segment is still fully materialized as one `bytes` object by
+`slice_bytes` before it's written, same as `split_at`. It's not a fully
+streaming, byte-for-byte pipeline; it just avoids the worst of `split_at`'s
+memory profile for this common case. For full control over how each
+segment is produced or written, call `frame_index_at`/`slice_bytes`
+directly instead of `split_to_files`, the same way `split_to_files` itself
+does internally.
 
 See [How It Works](./how-it-works.md) for why this approach is safe, and the
 [API Reference](./api-reference.md) for the full public surface.

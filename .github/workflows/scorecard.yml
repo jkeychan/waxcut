@@ -28,6 +28,15 @@ jobs:
         with:
           results_file: results.sarif
           results_format: sarif
+          # A fine-grained PAT scoped to Administration:read-only on this
+          # repo only (see #5) — the default GITHUB_TOKEN can't read
+          # classic branch protection rules, which Scorecard's
+          # Branch-Protection check needs. Not moved into a dedicated,
+          # protected Environment: this workflow has no pull_request
+          # trigger (push to main, schedule, branch_protection_rule only),
+          # so it never runs against attacker-controlled input the way a
+          # fork PR would, which is the scenario Environment protection
+          # rules primarily guard against.
           repo_token: ${{ secrets.SCORECARD_READ_TOKEN }}
           publish_results: true
 

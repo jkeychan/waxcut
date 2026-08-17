@@ -1,14 +1,14 @@
 # waxcut
 
-> Frame-accurate, lossless MP3 splitting and duration parsing in pure Python — no ffmpeg, no subprocess, no decode step. Cuts are made by parsing the file's own MPEG frame headers and byte-copying whole frames, so output is bit-identical to the source, just shorter.
+> Frame-accurate, lossless MP3 splitting and duration parsing in pure Python — no ffmpeg, no subprocess, no decode step. Cuts are made by parsing the file's own MPEG frame headers and byte-copying whole frames, so output is byte-identical to the corresponding span of the source audio frames, just shorter — leading ID3v2 tags, the VBR header frame, and any trailer present in the source are not carried into split output.
 
 Install: `pip install waxcut` or `uv add waxcut`. Zero runtime dependencies.
 
 ## Docs
 
-- [Getting Started](https://waxcut.pages.dev/docs/getting-started): install and usage, including `split_at` for N-way splits
+- [Getting Started](https://waxcut.pages.dev/docs/getting-started): install and usage, including `split_at` for N-way splits, `write_id3v2_tag` for tagging output, `parse_cue_sheet` for cue-sheet-driven splits, and `use_mmap`/`split_to_files` for large files
 - [API Reference](https://waxcut.pages.dev/docs/api-reference): every public function/class — signature, args, returns, raises
-- [How It Works](https://waxcut.pages.dev/docs/how-it-works): why frame-based splitting is safe; VBR, ID3v2, and LAME gapless handling
+- [How It Works](https://waxcut.pages.dev/docs/how-it-works): why frame-based splitting is safe; VBR, ID3v2, LAME gapless, and mmap loading
 - [Security](https://waxcut.pages.dev/docs/security): fuzzing, OpenSSF Scorecard, vulnerability reporting
 
 ## Optional

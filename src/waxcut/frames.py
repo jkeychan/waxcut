@@ -13,61 +13,112 @@ http://www.mp3-tech.org/programmer/frame_header.html
 from __future__ import annotations
 
 import bisect
+import enum
 import math
 import mmap
 import struct
+import warnings
 from array import array
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from io import BufferedReader
 from itertools import pairwise
 from pathlib import Path
-from typing import Literal
+from typing import overload
 
-# MPEG audio version. Not a continuous quantity -- 2.5 is a de facto extension
-# to the standard (low sample rates), not "halfway between 2 and 3".
-MpegVersion = Literal[1, 2, 2.5]
 
-FRAME_SYNC_MASK = 0xFFE00000
-FRAME_SYNC = 0xFFE00000
+class MpegVersion(enum.Enum):
+    """MPEG audio version. Not a continuous quantity -- 2.5 is a de facto
+    extension to the standard (low sample rates), not "halfway between 2
+    and 3". A plain Literal[1, 2, 2.5] isn't legal under PEP 586 (no float
+    in a Literal), and mixing int/float dict keys risks a silent hash
+    collision (hash(2) == hash(2.0)) -- an Enum sidesteps both.
+    """
+
+    MPEG1 = 1
+    MPEG2 = 2
+    MPEG2_5 = 2.5
+
+
+# The top 11 bits of a valid frame header are all set (the sync word); a
+# single constant serves as both the mask and the value to compare against.
+# (Previously two identically-valued constants, FRAME_SYNC_MASK and
+# FRAME_SYNC -- neither exported, both public-looking by name, which read
+# as though they meant two different things. Consolidated to one.)
+_FRAME_SYNC_MASK = 0xFFE00000
 
 # index -> MPEG version; 0b01 is reserved and never appears in valid frames
-_VERSIONS: dict[int, MpegVersion] = {0b00: 2.5, 0b10: 2, 0b11: 1}
-# index -> layer number; 0b00 is reserved. "MP3" is specifically Layer III —
-# Layer I/II frames are rejected rather than mishandled (see _parse_header).
+_VERSIONS: dict[int, MpegVersion] = {
+    0b00: MpegVersion.MPEG2_5,
+    0b10: MpegVersion.MPEG2,
+    0b11: MpegVersion.MPEG1,
+}
+# Layer III is the only layer this module parses -- "MP3" specifically means
+# Layer III; Layer I/II frames are rejected rather than mishandled (see
+# _parse_header). 0b00 is reserved and never appears in valid frames.
 _LAYER_III = 0b01
 
 # version -> bitrate index -> kbps, Layer III only; index 0 is "free" (unsupported), 15 is invalid
 _BITRATES_KBPS: dict[MpegVersion, list[int | None]] = {
-    1: [None, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, None],
-    2: [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
+    MpegVersion.MPEG1: [None, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, None],
+    MpegVersion.MPEG2: [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
 }
-_BITRATES_KBPS[2.5] = _BITRATES_KBPS[2]
+# MPEG2.5 shares MPEG2's bitrate table (list(...), not aliasing the same
+# list object -- nothing mutates either today, but aliasing would silently
+# corrupt both versions' tables the moment something did, e.g. adding
+# free-bitrate support that patches index 0).
+_BITRATES_KBPS[MpegVersion.MPEG2_5] = list(_BITRATES_KBPS[MpegVersion.MPEG2])
 
 # version -> sample rate index -> Hz; index 3 is reserved
 _SAMPLE_RATES: dict[MpegVersion, list[int | None]] = {
-    1: [44100, 48000, 32000, None],
-    2: [22050, 24000, 16000, None],
-    2.5: [11025, 12000, 8000, None],
+    MpegVersion.MPEG1: [44100, 48000, 32000, None],
+    MpegVersion.MPEG2: [22050, 24000, 16000, None],
+    MpegVersion.MPEG2_5: [11025, 12000, 8000, None],
 }
 
 # version -> samples per Layer III frame
-_SAMPLES_PER_FRAME: dict[MpegVersion, int] = {1: 1152, 2: 576, 2.5: 576}
+_SAMPLES_PER_FRAME: dict[MpegVersion, int] = {
+    MpegVersion.MPEG1: 1152,
+    MpegVersion.MPEG2: 576,
+    MpegVersion.MPEG2_5: 576,
+}
 
 # (version, mono) -> side info size in bytes, i.e. where a Xing/Info/VBRI
 # tag (if present) starts relative to the frame's own offset.
 _SIDE_INFO_SIZE: dict[tuple[MpegVersion, bool], int] = {
-    (1, False): 32,
-    (1, True): 17,
-    (2, False): 17,
-    (2, True): 9,
-    (2.5, False): 17,
-    (2.5, True): 9,
+    (MpegVersion.MPEG1, False): 32,
+    (MpegVersion.MPEG1, True): 17,
+    (MpegVersion.MPEG2, False): 17,
+    (MpegVersion.MPEG2, True): 9,
+    (MpegVersion.MPEG2_5, False): 17,
+    (MpegVersion.MPEG2_5, True): 9,
 }
-_VBR_HEADER_TAGS = (b"Xing", b"Info", b"VBRI")
+
+# The Fraunhofer VBRI header sits at a fixed offset of 32 bytes past the
+# 4-byte frame header, independent of channel mode, side-info size, or CRC --
+# unlike Xing/Info, which immediately follow the side info.
+_VBRI_FIXED_OFFSET = 36
 
 
-class UnsupportedMp3Error(ValueError):
+class WaxcutError(ValueError):
+    """Common base for waxcut's parse/format errors.
+
+    Lets a caller catch every waxcut-specific parse/format error with one
+    `except WaxcutError` rather than needing to know about each individual
+    exception tree (UnsupportedMp3Error's, FileTooLargeError's,
+    CueSheetError's, ...) separately. Still a ValueError subclass, so
+    existing `except ValueError` handlers written before this base class
+    existed keep working unchanged.
+
+    Caller-misuse errors -- invalid arguments to write_id3v2_tag,
+    frame_index_at, slice_bytes, split_to_files, or a stepped Frames
+    slice -- are deliberately plain ValueError/TypeError, not
+    WaxcutError, since they signal a bug in the calling code rather than
+    a malformed input.
+    """
+
+
+class UnsupportedMp3Error(WaxcutError):
     """Raised when frame parsing can't make sense of the input.
 
     This covers both "not an MP3 at all" (no valid Layer III sync found)
@@ -82,7 +133,7 @@ class UnsupportedMp3Error(ValueError):
 # file (measured; see SECURITY.md) -- it was ~6x before that redesign
 # (Frame objects boxed per-frame). This limit now exists to bound the
 # absolute worst-case time/memory of a single call, not to guard against
-# amplification specifically: 250 MB comfortably covers legitimate use
+# amplification specifically: 250 MiB comfortably covers legitimate use
 # (even multi-hour, high-bitrate recordings) while keeping a single call's
 # cost bounded. See SECURITY.md for the full threat-model note.
 _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
@@ -90,24 +141,71 @@ _MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MiB
 # use_mmap=True doesn't load the whole file into a Python bytes object, so
 # the memory-amplification rationale behind _MAX_FILE_SIZE_BYTES doesn't
 # apply here -- but scan_frames' worst-case adversarial cost is still O(n)
-# in wall-clock time regardless of what backs `data` (measured: ~150 MB/s
-# against a 20.6MB file of minimum-size MPEG2.5 frames, mmap vs. bytes
-# showed no meaningful throughput difference -- see SECURITY.md). This
-# cap bounds a single call's time cost, not its memory cost. 2 GiB
-# comfortably covers the motivating case (a 6-hour DJ set at a generous
-# 320kbps CBR is ~824MB) while keeping worst-case scan time under ~15s.
+# in wall-clock time regardless of what backs `data`. ~90 MB/s (measured
+# against a 20.6MB file of minimum-size MPEG2.5 frames -- see SECURITY.md
+# and bench/security_claims.py; hardware-dependent, re-measure rather than
+# treating this as a portable constant) is the valid-frame-carpet case,
+# where _parse_header only runs once per frame; it is not the true worst
+# case. The true worst case is a buffer that never forms a valid sync at
+# all (e.g. a carpet of 0xFF bytes), forcing a per-byte _parse_header
+# attempt -- measured at ~6 MB/s (1-8MB all-0xFF buffers). At that rate,
+# scanning the full 2 GiB cap byte-by-byte would take ~5.5 minutes -- but
+# scan_frames never actually gets there on adversarial input:
+# _MAX_TOTAL_RESYNC_FAILURES (below) aborts the scan once the *cumulative*
+# count of failed resync attempts across the whole scan exceeds the cap,
+# long before byte count alone would force the issue. Counting cumulatively
+# (not resetting on each successfully located frame) matters: an earlier
+# version of this bound reset on every accepted frame, so an attacker could
+# keep the running count under the cap indefinitely by planting one valid
+# frame every ~1.9 MB of adversarial filler, defeating the bound entirely
+# (measured ~50s on a 248 MiB file built exactly that way -- see the
+# regression test). This 2 GiB cap is safe against the adversarial case for
+# the cumulative-cap reason, not because the raw scan is fast enough to
+# finish -- it isn't. It still matters for the valid-frame-carpet case
+# (every failed attempt there is followed by a real frame, so cumulative
+# failures never accumulate meaningfully), where ~90 MB/s keeps a full
+# 2 GiB scan to well under a minute.
 #
-# Must stay under 4 GiB: frame offsets are stored in an array("I") (4-byte
-# unsigned int, max ~4.29 GB) in scan_frames below -- raising this cap past
-# that would silently overflow there.
+# Must stay under 4 GiB: frame offsets are stored in an array("I") in
+# scan_frames below -- raising this cap past array("I")'s ~4.29 GB range
+# would raise OverflowError there, loudly, not silently -- but a caller
+# passing a max_size above the platform's actual array("I") range as a
+# public, uncapped `max_size` argument shouldn't be relying on a raised
+# exception in an internal detail as validation. "I" is C unsigned int,
+# which the array module documents as *at least* 2 bytes, not guaranteed
+# exactly 4 -- true on every platform this runs on today, but if that ever
+# changed, array("I").itemsize is available to size this cap from directly
+# rather than assuming 4.
 _MAX_MMAP_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+
+# Bounds scan_frames' worst-case wall-clock cost independent of either size
+# cap above: an adversarial buffer that never forms a valid sync (e.g. a
+# carpet of 0xFF bytes) forces a per-byte _parse_header attempt, measured
+# at ~6 MB/s (~160ns/byte -- see _MAX_MMAP_FILE_SIZE_BYTES above). Without
+# this bound, that reaches ~5.5 minutes before the 2 GiB use_mmap cap forces
+# the issue. 2,000,000 failed attempts, at that same ~160ns each, is ~360ms
+# (measured; see bench/security_claims.py) -- tight enough to keep
+# worst-case cost sub-second regardless of which size cap applies, while
+# generous enough that no legitimate file trips it: a real file's non-frame
+# bytes are its ID3v2 tag, already skipped by id3v2_size before this loop
+# starts, and 2,000,000 candidate-but-invalid 0xFF bytes with no real frame
+# to explain them anywhere in the file is far beyond what any genuinely
+# corrupted-but-real MP3 (a few damaged frames, a stray ID3v1/APE trailer)
+# would ever produce.
+#
+# This count is cumulative across the entire scan, not reset when a frame
+# is successfully located -- see _resync_failed's docstring in scan_frames
+# for why resetting on success was a real, exploitable gap.
+_MAX_TOTAL_RESYNC_FAILURES = 2_000_000
+
+_MIB_PER_GIB = 1024  # used to format FileTooLargeError's message below
 
 
 class FileTooLargeError(UnsupportedMp3Error):
     """Raised when input exceeds the applicable size limit.
 
-    The default limit is _MAX_FILE_SIZE_BYTES (250 MB); load_audio_stream
-    applies the larger _MAX_MMAP_FILE_SIZE_BYTES (2 GB) instead when called
+    The default limit is _MAX_FILE_SIZE_BYTES (250 MiB); load_audio_stream
+    applies the larger _MAX_MMAP_FILE_SIZE_BYTES (2 GiB) instead when called
     with use_mmap=True.
 
     A subclass of UnsupportedMp3Error, so existing `except
@@ -143,12 +241,18 @@ class Frames(Sequence["Frame"]):
     """A memory-compact, lazily-materialized sequence of Frame.
 
     Backed by four parallel array.array buffers (packed, unboxed values)
-    instead of a list of Frame objects -- ~24 bytes/frame vs. ~168
-    bytes/frame for an equivalent list[Frame], since no per-frame Python
-    object or boxed int/float is allocated until you actually index into
-    it. Supports the same operations a list[Frame] does: len(), positive
-    and negative indexing, slicing (returns another Frames, sharing the
-    same backing arrays -- slicing never copies), and iteration.
+    instead of a list of Frame objects -- ~24 bytes/frame vs. ~128
+    bytes/frame for an equivalent list[Frame] (measured; see SECURITY.md),
+    since no per-frame Python object or boxed int/float is allocated until
+    you actually index into it. Supports the same operations a list[Frame]
+    does: len(), positive and negative indexing, slicing (returns another
+    Frames, sharing the same backing arrays -- slicing never copies), and
+    iteration. Stepped slicing (e.g. frames[::2]) is not supported and
+    raises TypeError -- real step support for this array-backed view is
+    nontrivial and not needed by any caller in this codebase. Unlike
+    list[Frame], equality is identity-based: this class defines no
+    __eq__, so two Frames views over equal underlying data are only ==
+    if they're the same object.
 
     Not constructed directly by callers -- returned by scan_frames and
     found on AudioStream.frames.
@@ -156,7 +260,9 @@ class Frames(Sequence["Frame"]):
 
     __slots__ = ("_duration_ms", "_lengths", "_offsets", "_start", "_start_ms", "_start_ms_bias", "_stop")
 
-    def __init__(self, offsets: array, lengths: array, start_ms: array, duration_ms: array) -> None:
+    def __init__(
+        self, offsets: array[int], lengths: array[int], start_ms: array[float], duration_ms: array[float]
+    ) -> None:
         self._offsets = offsets
         self._lengths = lengths
         self._start_ms = start_ms
@@ -174,7 +280,10 @@ class Frames(Sequence["Frame"]):
         view._start_ms = base._start_ms
         view._duration_ms = base._duration_ms
         view._start = start
-        view._stop = stop
+        # A reversed slice (frames[5:2]) would otherwise give a negative
+        # __len__, which CPython rejects with ValueError -- clamp to an
+        # empty view, matching what list does for the same slice.
+        view._stop = max(start, stop)
         view._start_ms_bias = start_ms_bias
         return view
 
@@ -189,11 +298,16 @@ class Frames(Sequence["Frame"]):
             duration_ms=self._duration_ms[real_index],
         )
 
+    @overload
+    def __getitem__(self, index: int) -> Frame: ...
+    @overload
+    def __getitem__(self, index: slice) -> Frames: ...
+
     def __getitem__(self, index: int | slice) -> Frame | Frames:
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
             if step != 1:
-                raise ValueError("Frames slicing does not support a step")
+                raise TypeError("Frames slicing does not support a step")
             return Frames._view(self, self._start + start, self._start + stop, self._start_ms_bias)
         if index < 0:
             index += len(self)
@@ -205,6 +319,9 @@ class Frames(Sequence["Frame"]):
         for i in range(self._start, self._stop):
             yield self._frame_at(i)
 
+    def __repr__(self) -> str:
+        return f"<Frames: {len(self)} frame(s)>"
+
     def rebase(self, offset_ms: float) -> Frames:
         """A view with every start_ms reduced by offset_ms, without copying."""
         return Frames._view(self, self._start, self._stop, self._start_ms_bias + offset_ms)
@@ -212,17 +329,32 @@ class Frames(Sequence["Frame"]):
 
 _ID3V2_HEADER_SIZE = 10
 
+# bytearray supports .find()/indexing/slicing identically to bytes, so
+# scan_frames/id3v2_size/slice_bytes (and the private helpers they call
+# with the same `data`) accept it too -- a memoryview does not (no
+# .find()) despite superficially looking bytes-like otherwise.
+_RawBytes = bytes | bytearray | mmap.mmap
 
-def id3v2_size(data: bytes) -> int:
+_ID3V2_FOOTER_MIN_MAJOR_VERSION = 4  # the footer flag (0x10) is ID3v2.4-only
+
+
+def id3v2_size(data: _RawBytes) -> int:
     """Return the byte length of a leading ID3v2 tag, or 0 if there isn't one.
 
     Args:
-        data: Raw file bytes. Any bytes-like object indexable/sliceable
-            the same way as bytes is accepted.
+        data: Raw file bytes. bytes, bytearray, or mmap.mmap -- a
+            memoryview is not accepted (it has no .find()).
 
     Returns:
         The size in bytes of the ID3v2 tag if present (including the 10-byte
-        header), or 0 if no ID3v2 tag is found.
+        header), or 0 if no ID3v2 tag is found. Clamped to len(data): a
+        tag's declared size can never legitimately exceed the buffer that
+        contains it, so a syncsafe size field claiming more than that (a
+        crafted or corrupted four bytes) is capped rather than trusted --
+        without this, callers like scan_frames start their scan past EOF
+        and report no audio found at all in a file that may have perfectly
+        good frames after a merely mis-sized tag. Found by a fresh
+        adversarial code review.
     """
     if len(data) < _ID3V2_HEADER_SIZE or data[:3] != b"ID3":
         return 0
@@ -230,10 +362,21 @@ def id3v2_size(data: bytes) -> int:
     size = 0
     for byte in data[6:10]:
         size = (size << 7) | (byte & 0x7F)
-    return _ID3V2_HEADER_SIZE + size
+    # Flags bit 0x10 (ID3v2.4 only) means a 10-byte footer -- a mirror of
+    # the header -- immediately follows the tag body, and its length isn't
+    # included in the syncsafe size field above. data[3] is the major
+    # version; that bit is reserved (must be zero) in ID3v2.2/2.3, so a
+    # tag that sets it anyway must not have 10 bytes skipped that were
+    # never actually written -- found by a fresh adversarial code review.
+    if data[3] >= _ID3V2_FOOTER_MIN_MAJOR_VERSION and data[5] & 0x10:
+        size += 10
+    return min(_ID3V2_HEADER_SIZE + size, len(data))
 
 
-_ID3V2_TAG_VERSION = b"\x03\x00"  # ID3v2.3.0 -- see plan doc for why not 2.4
+_ID3V2_TAG_VERSION = b"\x03\x00"  # ID3v2.3.0: far more widely supported by
+# real-world players/tools than 2.4, and this module's format choices
+# (plain big-endian frame sizes in _text_frame, no UTF-8 in _encode_text)
+# are 2.3-specific -- writing a 2.4 tag would need different framing.
 _LATIN1_ENCODING_BYTE = b"\x00"
 _UTF16_ENCODING_BYTE = b"\x01"
 _UTF16_LE_BOM = b"\xff\xfe"
@@ -246,6 +389,9 @@ def _syncsafe(n: int) -> bytes:
     return bytes(((n >> shift) & 0x7F) for shift in (21, 14, 7, 0))
 
 
+_FORBIDDEN_TEXT_CHARS = ("\x00", "\r", "\n")
+
+
 def _encode_text(text: str) -> bytes:
     """ID3v2.3 text-frame content: 1-byte encoding flag + encoded text.
 
@@ -254,11 +400,44 @@ def _encode_text(text: str) -> bytes:
     little-endian BOM (encoding byte 0x01) otherwise. UTF-8 (encoding byte
     0x03) is a v2.4-only addition and is invalid in a v2.3 tag, which is
     why this doesn't just always use UTF-8.
+
+    Raises:
+        ValueError: `text` contains NUL, CR, or LF -- these pass through
+            the encoding step unremarked, but a NUL truncates the field
+            for any reader that treats it as a C string terminator, and
+            CR/LF can make what's stored differ from what's displayed
+            (e.g. multi-line-looking output from a single-line field).
+            Rejecting them is safer than silently stripping, which could
+            surprise a caller with different content than what they
+            passed in. Also raised, with a message naming this specific
+            cause, if `text` contains a lone surrogate or other character
+            that UTF-16 itself can't encode -- the one case the Latin-1/
+            UTF-16 fallback above doesn't cover. This is realistic input,
+            not just a theoretical edge case: os.fsdecode() produces lone
+            surrogates for a filename that isn't valid UTF-8, and naming
+            a split track after its source filename is an obvious use of
+            this function.
     """
+    for char in _FORBIDDEN_TEXT_CHARS:
+        if char in text:
+            raise ValueError(f"write_id3v2_tag() text fields cannot contain {char!r}, got {text!r}")
     try:
         return _LATIN1_ENCODING_BYTE + text.encode("latin-1")
     except UnicodeEncodeError:
+        pass
+    try:
         return _UTF16_ENCODING_BYTE + _UTF16_LE_BOM + text.encode("utf-16-le")
+    except UnicodeEncodeError as exc:
+        # Found by a fresh adversarial code review: this encode was
+        # previously unguarded, so a lone surrogate (os.fsdecode()'s
+        # output for a non-UTF-8 filename, most commonly) leaked a raw,
+        # undocumented UnicodeEncodeError instead of the clear message
+        # every other rejection in this function gives.
+        raise ValueError(
+            f"write_id3v2_tag() text fields must be encodable as UTF-16 -- "
+            f"got {text!r}, which contains a lone surrogate or other "
+            "character neither Latin-1 nor UTF-16 can represent"
+        ) from exc
 
 
 def _text_frame(frame_id: bytes, text: str) -> bytes:
@@ -287,6 +466,17 @@ def write_id3v2_tag(
     and refuses to tag over it (see Raises below) rather than stacking a
     second tag on top of it.
 
+    Known limitation: this function does not implement ID3v2 unsynchronisation
+    (the spec-defined scheme of inserting a 0x00 byte after every 0xFF byte
+    in the tag body, so a false MPEG sync pattern can never occur inside a
+    tag). A crafted title/artist could in principle contain bytes that,
+    combined with adjacent frame bytes, form a false MPEG sync word (e.g.
+    0xFF 0xFB) inside the tag body -- waxcut itself is unaffected (it always
+    skips the tag via id3v2_size before scanning for frames), but a naive or
+    non-compliant player that doesn't honor unsynchronisation, or that scans
+    for sync words without first parsing the ID3v2 header, could misdecode
+    tag bytes as audio before the real content. See SECURITY.md.
+
     Args:
         data: Bytes to tag, typically the output of slice_bytes or one
             element of split_at's return value. Coerced to bytes via
@@ -303,12 +493,13 @@ def write_id3v2_tag(
         `data`, unmodified.
 
     Raises:
-        ValueError: `track` is given and is less than 1, `data` already
+        ValueError: `track` is given and is less than 1, `title`/`artist`
+            contains NUL, CR, or LF (see _encode_text), `data` already
             starts with an ID3v2 tag (stacking a second tag on top would
             corrupt frame scanning, since scan_frames/id3v2_size only ever
             skip the outermost tag), or the combined size of the requested
             frames does not fit in a 4-byte ID3v2 syncsafe integer (the
-            ~256 MB tag-size ceiling the format itself imposes --
+            ~256 MiB tag-size ceiling the format itself imposes --
             effectively unreachable for title/artist/track text, but
             guarded rather than silently overflowing).
     """
@@ -335,12 +526,12 @@ def write_id3v2_tag(
     return header + frame_bytes + data
 
 
-def _parse_header(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVersion, int, int, int] | None:
+def _parse_header(data: _RawBytes, offset: int) -> tuple[MpegVersion, int, int, int] | None:
     """Return (version, bitrate_kbps, sample_rate, padding) for a valid Layer III header, else None."""
     if offset + 4 > len(data):
         return None
     header = struct.unpack_from(">I", data, offset)[0]
-    if header & FRAME_SYNC_MASK != FRAME_SYNC:
+    if header & _FRAME_SYNC_MASK != _FRAME_SYNC_MASK:
         return None
 
     version = _VERSIONS.get((header >> 19) & 0b11)
@@ -360,7 +551,7 @@ def _parse_header(data: bytes | mmap.mmap, offset: int) -> tuple[MpegVersion, in
 
 
 def _frame_length(version: MpegVersion, bitrate_kbps: int, sample_rate: int, padding: int) -> int:
-    coefficient = 144 if version == 1 else 72
+    coefficient = 144 if version is MpegVersion.MPEG1 else 72
     return int(coefficient * bitrate_kbps * 1000 / sample_rate) + padding
 
 
@@ -378,25 +569,60 @@ def _has_crc(header: int) -> bool:
     return protection_bit == 0
 
 
-def _vbr_header_tag_offset(data: bytes | mmap.mmap, frame: Frame, version: MpegVersion) -> int | None:
+def _vbr_header_tag_offset(data: _RawBytes, frame: Frame, version: MpegVersion) -> int | None:
     """Byte offset (relative to `frame.offset`) of a Xing/Info/VBRI tag, if this frame is one."""
     header = struct.unpack_from(">I", data, frame.offset)[0]
     side_info = _SIDE_INFO_SIZE[(version, _is_mono(header))]
     crc = _CRC_SIZE if _has_crc(header) else 0
-    tag_start = 4 + crc + side_info
-    if frame.offset + tag_start + 4 > len(data):
-        return None
-    tag = data[frame.offset + tag_start : frame.offset + tag_start + 4]
-    return tag_start if tag in _VBR_HEADER_TAGS else None
+    xing_start = 4 + crc + side_info
+    # A Xing/Info/VBRI tag lives inside its own frame, so bound the probe by
+    # the frame's end as well as the buffer's: bytes past frame.offset +
+    # frame.length belong to whatever follows (another frame, a trailer, or
+    # nothing at all near EOF) and must not be read as this frame's tag.
+    tag_limit = min(len(data), frame.offset + frame.length)
+
+    if frame.offset + xing_start + 4 <= tag_limit:
+        tag = data[frame.offset + xing_start : frame.offset + xing_start + 4]
+        if tag in (b"Xing", b"Info"):
+            return xing_start
+
+    if frame.offset + _VBRI_FIXED_OFFSET + 4 <= tag_limit:
+        tag = data[frame.offset + _VBRI_FIXED_OFFSET : frame.offset + _VBRI_FIXED_OFFSET + 4]
+        if tag == b"VBRI":
+            return _VBRI_FIXED_OFFSET
+
+    return None
 
 
 _LAME_DELAY_PADDING_SIZE = 3  # bytes holding two packed 12-bit fields
 _TWELVE_BIT_FIELD_LIMIT = 4096
 
 
-def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
+def _parse_lame_gapless(data: _RawBytes, frame: Frame, tag_offset: int) -> tuple[int, int] | None:
     """Extract (encoder_delay_samples, encoder_padding_samples) from a LAME extension tag, if present."""
     pos = frame.offset + tag_offset
+    # A VBRI tag has no LAME extension in this layout at all -- the bytes
+    # immediately after it are VBRI's own version/delay/quality fields, not
+    # a Xing-style flags bitmask, so blindly parsing them as one would read
+    # garbage. In practice the b"LAME" magic check a few lines below
+    # rejects it anyway (VBRI's version field is never that), but relying
+    # on an accidental save is fragile -- refuse the VBRI case explicitly
+    # instead. Found by a fresh adversarial code review.
+    if data[pos : pos + 4] == b"VBRI":
+        return None
+    # The LAME extension lives inside the same frame as the Xing/Info tag
+    # that precedes it, so bound reads by the frame's end as well as the
+    # buffer's — same reasoning as _vbr_header_tag_offset. Without this,
+    # bytes past frame.offset + frame.length belong to whatever follows
+    # (another frame, a trailer, or nothing at all near EOF) and would be
+    # misread as this frame's gapless data instead of just failing to parse.
+    tag_limit = min(len(data), frame.offset + frame.length)
+    # The tag's own 4 bytes plus the 4-byte flags word that follows them.
+    # _vbr_header_tag_offset only guarantees the tag itself is present, so
+    # this must be checked here or the unpack below raises a raw
+    # struct.error out of the public API on a truncated/crafted file.
+    if pos + 8 > tag_limit:
+        return None
     flags = struct.unpack_from(">I", data, pos + 4)[0]
     pos += 8
     for flag_bit, size in ((0b0001, 4), (0b0010, 4), (0b0100, 100), (0b1000, 4)):
@@ -404,7 +630,7 @@ def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) 
             pos += size
 
     lame_start = pos
-    if lame_start + 24 > len(data):
+    if lame_start + 24 > tag_limit:
         return None
     version_string = data[lame_start : lame_start + 9]
     # Only genuine LAME encodes reliably populate the extended gapless
@@ -415,18 +641,106 @@ def _parse_lame_gapless(data: bytes | mmap.mmap, frame: Frame, tag_offset: int) 
     if not version_string.startswith(b"LAME"):
         return None
 
+    # The 24-byte check above guarantees this slice is always exactly
+    # _LAME_DELAY_PADDING_SIZE (3) bytes, and delay/padding are unpacked
+    # from exactly 12 bits each -- both structurally always in range
+    # [0, _TWELVE_BIT_FIELD_LIMIT), by construction, not by luck (verified
+    # by enumerating the full byte space: max observed value is 4095).
+    # This project's convention is not to guard against scenarios that
+    # can't happen; two defensive checks removed here, found dead by a
+    # fresh adversarial code review.
     delay_padding = data[lame_start + 21 : lame_start + 24]
-    if len(delay_padding) != _LAME_DELAY_PADDING_SIZE:
-        return None
     delay = (delay_padding[0] << 4) | (delay_padding[1] >> 4)
     padding = ((delay_padding[1] & 0x0F) << 8) | delay_padding[2]
-
-    if not (0 <= delay < _TWELVE_BIT_FIELD_LIMIT and 0 <= padding < _TWELVE_BIT_FIELD_LIMIT):
-        return None
     return delay, padding
 
 
-def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Frames:
+def _parse_candidate_frame(data: _RawBytes, offset: int) -> tuple[MpegVersion, int, int] | None:
+    """(version, sample_rate, length) for a valid, in-bounds frame at offset, else None.
+
+    Combines _parse_header's header validation with _frame_length's length
+    check into one candidate/reject decision, so scan_frames' "candidate
+    rejected, advance and retry" logic doesn't need to be duplicated for
+    each of the two ways a candidate can fail.
+    """
+    parsed = _parse_header(data, offset)
+    if parsed is None:
+        return None
+    version, bitrate, sample_rate, padding = parsed
+    length = _frame_length(version, bitrate, sample_rate, padding)
+    # length <= 0 is not checked here: enumerating every valid (version,
+    # bitrate, sample_rate, padding) combination _parse_header can return
+    # shows the minimum possible length is 24, never <= 0 -- structurally
+    # dead by construction, not by luck. Verified by a fresh adversarial
+    # code review's own enumeration, and independently re-checked here.
+    if offset + length > len(data):
+        return None
+    return version, sample_rate, length
+
+
+def _confirm_first_frame(data: _RawBytes, offset: int, length: int) -> bool:
+    """Whether a first-frame candidate is followed by a second real sync, or EOF.
+
+    A sync-mask match plus valid version/layer/bitrate/sample-rate bits occurs
+    by chance in arbitrary binary roughly every few hundred KB, and can be
+    planted deliberately for free. Only the FIRST frame needs this check --
+    its header seeds sample_rate and every other frame's start_ms for the
+    whole scan, so a spurious match there corrupts everything downstream;
+    a spurious match after real audio has already started doesn't have that
+    blast radius and isn't worth the extra _parse_header call per frame.
+    """
+    next_offset = offset + length
+    return next_offset >= len(data) or _parse_header(data, next_offset) is not None
+
+
+def _finalize_scan(
+    raw_frames: tuple[array[int], array[int], array[float], array[float]],
+    first_candidate: tuple[int, int, MpegVersion, int] | None,
+    resync_cap_hit: bool,
+) -> Frames:
+    """Apply the first_candidate fallback if nothing was confirmed, then raise or return.
+
+    first_candidate is the first first-frame candidate scan_frames found that
+    _confirm_first_frame couldn't confirm (see its docstring) -- a genuine
+    single-frame file followed only by a short, non-frame trailer (an ID3v1/
+    APE tag) looks exactly like an unconfirmable first frame too, so if
+    nothing better ever turns up, this fallback is what gets returned rather
+    than reporting no audio found at all.
+    """
+    offsets, lengths, start_ms_values, duration_ms_values = raw_frames
+    if not offsets and first_candidate is not None:
+        offset, length, version, sample_rate = first_candidate
+        samples = _SAMPLES_PER_FRAME[version]
+        offsets.append(offset)
+        lengths.append(length)
+        start_ms_values.append(0.0)
+        duration_ms_values.append(samples / sample_rate * 1000)
+
+    if not offsets:
+        if resync_cap_hit:
+            raise UnsupportedMp3Error(
+                f"No valid MPEG audio frame found in {_MAX_TOTAL_RESYNC_FAILURES} "
+                "total failed resync attempts; giving up rather than scanning "
+                "the rest of the input."
+            )
+        raise UnsupportedMp3Error("No valid MPEG audio frames found.")
+    if resync_cap_hit:
+        # Frames were found, but the scan gave up before reaching the end of
+        # `data` -- unlike genuine EOF (find() returning -1), this means
+        # there may be more real audio after the point the scan abandoned,
+        # discarded silently unless the caller is told. See scan_frames'
+        # own Raises: docstring for the full rationale.
+        warnings.warn(
+            f"scan_frames stopped after {_MAX_TOTAL_RESYNC_FAILURES} total failed "
+            f"resync attempts, before reaching the end of the input -- returning "
+            f"the {len(offsets)} frame(s) found so far; any audio after the point "
+            "the scan gave up is not included.",
+            stacklevel=3,
+        )
+    return Frames(offsets, lengths, start_ms_values, duration_ms_values)
+
+
+def scan_frames(data: _RawBytes, *, max_size: int | None = None) -> Frames:
     """Scan raw MP3 bytes and return every located frame, in order.
 
     Skips a leading ID3v2 tag if present. Includes the Xing/Info/VBRI
@@ -435,42 +749,102 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
     should use load_audio_stream instead, which calls this internally.
 
     Args:
-        data: Raw file bytes. Any bytes-like object indexable/sliceable
-            the same way as bytes is accepted; a plain bytes object is
-            the tested and expected case.
-        max_size: Maximum allowed size in bytes. Defaults to 250 MB, the
+        data: Raw file bytes. bytes, bytearray, or mmap.mmap -- anything
+            supporting .find() the same way bytes does -- is accepted; a
+            memoryview is not (it has no .find()), despite superficially
+            looking bytes-like otherwise. A plain bytes object is the
+            tested and expected case.
+        max_size: Maximum allowed size in bytes. Defaults to 250 MiB, the
             same cap load_audio_stream applies by default; pass a larger
             value to override it (load_audio_stream does this internally
-            to apply its own, larger 2 GB cap when called with
+            to apply its own, larger 2 GiB cap when called with
             use_mmap=True). Most callers should leave this at the default.
 
     Returns:
         A Frames sequence in file order, each with byte offset/length and
-        cumulative start_ms/duration_ms. Behaves like list[Frame] (len(),
-        indexing, negative indexing, slicing, iteration) but is backed by
-        compact packed arrays rather than one Python object per frame.
+        cumulative start_ms/duration_ms. Supports len(), positive/negative
+        indexing, iteration, and slicing with a step of 1 (a stepped slice
+        raises TypeError) the same way list[Frame] does, but is backed by
+        compact packed arrays rather than one Python object per frame, and
+        compares by identity rather than value (see the Frames class
+        docstring for both caveats in full). The first frame is confirmed
+        by a second real sync immediately after it (or EOF) before being
+        trusted, since its header seeds sample_rate and every other
+        frame's start_ms for the whole result -- a syntactically valid
+        4-byte header can occur by chance in arbitrary binary, and a
+        false lock there would otherwise corrupt those values silently.
+        Frames after the first are not re-confirmed this way.
 
     Raises:
         UnsupportedMp3Error: No valid MPEG-1/2/2.5 Layer III frame was
             found anywhere in `data`. This is the correct outcome for
             non-MP3 files, empty input, and Layer I/II files (rejected
-            on purpose — see module docstring).
+            on purpose — see module docstring). Also raised if
+            _MAX_TOTAL_RESYNC_FAILURES candidate sync bytes, cumulative
+            across the whole scan, each fail header validation without
+            enough real frames in between to explain them *and* no frame
+            has been located yet -- input that looks nothing like an MP3
+            from the start is rejected quickly instead of scanning all the
+            way to max_size (see _MAX_TOTAL_RESYNC_FAILURES's own comment).
+            If frames were already found before the cap tripped, the bound
+            still trips at the same point, but scan_frames returns those
+            frames instead of raising -- the same outcome as when `data`
+            simply runs out via find() returning -1, except a
+            UserWarning is also raised, since unlike genuine EOF this
+            means the scan gave up before reaching the end of `data`.
         FileTooLargeError: `data` exceeds max_size. See SECURITY.md.
     """
+    if isinstance(data, memoryview):
+        # A bare AttributeError from the .find() call below (memoryview has
+        # no .find()) is an unhelpful way to discover this -- memoryview is
+        # the single most obvious "bytes-like" type someone would reach for
+        # specifically to avoid a copy, and this docstring already warns
+        # it's not accepted; a clear, actionable message beats a stack
+        # trace pointing at an internal implementation detail. Found by a
+        # fresh adversarial code review.
+        raise TypeError(
+            "scan_frames() does not accept memoryview (no .find() method) -- pass bytes(data) instead."
+        )
     if max_size is None:
         max_size = _MAX_FILE_SIZE_BYTES
     if len(data) > max_size:
         raise FileTooLargeError(f"Input is {len(data)} bytes, exceeding the {max_size}-byte limit.")
     offset = id3v2_size(data)
-    offsets: array = array("I")
-    lengths: array = array("I")
-    start_ms_values: array = array("d")
-    duration_ms_values: array = array("d")
+    offsets: array[int] = array("I")
+    lengths: array[int] = array("I")
+    start_ms_values: array[float] = array("d")
+    duration_ms_values: array[float] = array("d")
     cursor_ms = 0.0
+    total_resync_failures = 0
+    resync_cap_hit = False
+    # The first first-frame candidate that _confirm_first_frame couldn't
+    # confirm -- a fallback of last resort, see _finalize_scan's docstring.
+    first_candidate: tuple[int, int, MpegVersion, int] | None = None
+
+    def _resync_failed() -> bool:
+        # Called on every failed resync attempt (a candidate 0xFF byte
+        # that didn't turn into a real frame). This count is cumulative
+        # across the ENTIRE scan and must never be reset when a frame is
+        # successfully located -- an earlier version reset it on every
+        # accepted frame, which let an attacker keep the running count
+        # under the cap indefinitely by planting one valid frame every
+        # ~1.9 MB of adversarial filler (measured ~50s on a 248 MiB file
+        # built exactly that way, against a documented "sub-second" bound
+        # -- see the regression test and _MAX_TOTAL_RESYNC_FAILURES's own
+        # comment). Counting cumulatively closes that gap: a real file's
+        # non-frame bytes are its ID3v2 tag (already skipped) plus at most
+        # a small trailer, so legitimate files never accumulate anywhere
+        # near the cap regardless of how many valid frames they contain.
+        # Returns True once the cap trips, so the caller can stop scanning
+        # (same worst-case time bound either way) without discarding
+        # frames already found.
+        nonlocal total_resync_failures
+        total_resync_failures += 1
+        return total_resync_failures > _MAX_TOTAL_RESYNC_FAILURES
 
     while True:
         # Every valid sync requires the byte at `offset` to be exactly 0xFF
-        # (the top byte of FRAME_SYNC_MASK) -- _parse_header would reject
+        # (the top byte of _FRAME_SYNC_MASK) -- _parse_header would reject
         # any other byte immediately anyway, so jump straight past them with
         # a fast C-level scan instead of calling into _parse_header (struct
         # unpack + bit masking) for every single byte of a non-frame gap
@@ -479,17 +853,25 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
         if offset == -1:
             break
 
-        parsed = _parse_header(data, offset)
-        if parsed is None:
-            # 0xFF matched but the rest of the header didn't -- a coincidental
-            # byte, not a real sync. Advance one byte and keep scanning.
+        candidate = _parse_candidate_frame(data, offset)
+        if candidate is None:
+            # 0xFF matched but the rest of the header (or the length it
+            # implies) didn't -- a coincidental byte, not a real sync.
+            # Advance one byte and keep scanning.
             offset += 1
+            if _resync_failed():
+                resync_cap_hit = True
+                break
             continue
+        version, sample_rate, length = candidate
 
-        version, bitrate, sample_rate, padding = parsed
-        length = _frame_length(version, bitrate, sample_rate, padding)
-        if length <= 0 or offset + length > len(data):
+        if not offsets and not _confirm_first_frame(data, offset, length):
+            if first_candidate is None:
+                first_candidate = (offset, length, version, sample_rate)
             offset += 1
+            if _resync_failed():
+                resync_cap_hit = True
+                break
             continue
 
         samples = _SAMPLES_PER_FRAME[version]
@@ -511,16 +893,15 @@ def scan_frames(data: bytes | mmap.mmap, *, max_size: int | None = None) -> Fram
         cursor_ms += duration_ms
         offset += length
 
-    if not offsets:
-        raise UnsupportedMp3Error("No valid MPEG audio frames found.")
-    return Frames(offsets, lengths, start_ms_values, duration_ms_values)
+    raw_frames = (offsets, lengths, start_ms_values, duration_ms_values)
+    return _finalize_scan(raw_frames, first_candidate, resync_cap_hit)
 
 
 def total_duration_ms(frames: Sequence[Frame]) -> float:
     """Total playback duration spanned by `frames`, in milliseconds.
 
     Args:
-        frames: A non-empty list of Frame, as returned by scan_frames.
+        frames: A non-empty Sequence[Frame], as returned by scan_frames.
 
     Returns:
         The last frame's start_ms + duration_ms.
@@ -571,30 +952,44 @@ def frame_index_at(frames: Sequence[Frame], target_ms: float) -> int:
     return max(idx, 0)
 
 
-def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes:
-    """Byte range covering frames[start_idx:end_idx], contiguous.
+def slice_bytes(data: _RawBytes, frames: Sequence[Frame], start_idx: int, end_idx: int) -> bytes:
+    """Byte range spanning frames[start_idx:end_idx].
 
-    This is a plain byte-copy, not a re-parse: frames are assumed
-    contiguous (true for anything scan_frames produced from the same
-    `data`), so the range is just [frames[start_idx].offset,
-    frames[end_idx - 1] end).
+    This is a plain byte-copy, not a re-parse: the range returned is
+    exactly [frames[start_idx].offset, frames[end_idx - 1] end), regardless
+    of what lies between those two points. For output from a single,
+    uninterrupted scan_frames call over the same `data`, consecutive
+    frames are contiguous (each one starts exactly where the previous one
+    ends) and this is a clean cut with nothing else in it. It is NOT
+    guaranteed for frames assembled from a scan that skipped a gap
+    (adversarial or corrupted input the scanner resynced past) or from a
+    caller-constructed Sequence[Frame] mixing frames from different
+    sources -- in either case, bytes between two non-adjacent frames are
+    silently included in the slice too.
 
     Args:
         data: The same bytes `frames` was derived from.
-        frames: Frame list from scan_frames or AudioStream.frames.
+        frames: A Sequence[Frame] from scan_frames or AudioStream.frames.
         start_idx: First frame index to include (inclusive).
         end_idx: One past the last frame index to include (exclusive) —
             standard Python slice semantics.
 
     Returns:
         The raw bytes for that frame range. Empty bytes if
-        `start_idx >= end_idx`. This output is itself a decodable MP3
-        stream (no container/ID3 wrapper), byte-identical to the
-        corresponding span of the original file.
+        `start_idx >= end_idx` -- including when both are equally far out
+        of range for `frames` (e.g. start_idx=len(frames)+1,
+        end_idx=len(frames)+1): this check runs before either index is
+        used to index into `frames`, so an empty range never raises even
+        if its indices wouldn't be valid on their own. For contiguous
+        input (see above), this output is itself a decodable MP3 stream
+        (no container/ID3 wrapper), byte-identical to the corresponding
+        span of the original file.
 
     Raises:
         ValueError: `frames` is empty.
-        IndexError: `start_idx` or `end_idx` is out of range for `frames`.
+        IndexError: `start_idx` or `end_idx` is negative, or a non-empty
+            range (`start_idx < end_idx`) reaches an index out of range
+            for `frames`.
     """
     if not frames:
         raise ValueError("slice_bytes() requires a non-empty frame list")
@@ -606,10 +1001,16 @@ def slice_bytes(data: bytes | mmap.mmap, frames: Sequence[Frame], start_idx: int
         return b""
     start = frames[start_idx].offset
     end = frames[end_idx - 1].offset + frames[end_idx - 1].length
-    return data[start:end]
+    # bytes(x) is a no-op (returns x itself) when x is already bytes or an
+    # mmap slice (mmap.__getitem__ always returns bytes), but a bytearray
+    # slice is itself a bytearray -- without this coercion, bytearray
+    # input made slice_bytes return bytearray despite being annotated
+    # -> bytes, which mypy --strict accepted (bytearray silently satisfies
+    # a bytes usage nowhere else in the type system) but is unsound.
+    return bytes(data[start:end])
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class AudioStream:
     """Parsed MP3 stream with located frames and gapless metadata.
 
@@ -617,10 +1018,14 @@ class AudioStream:
     as a context manager (`with load_audio_stream(...) as stream:`) or
     explicit stream.close() -- required when loaded with use_mmap=True to
     release the underlying file handle and mmap; a harmless no-op
-    otherwise. Equality/hashing are identity-based (two AudioStreams
-    parsed from the same file are not `==`), regardless of use_mmap --
-    this was already true before use_mmap existed, since AudioStream.frames
-    (a Frames instance) has never supported content-based equality either.
+    otherwise. Equality/hashing are identity-based (`object`'s default --
+    two AudioStreams parsed from the same file are not `==`), regardless
+    of use_mmap: eq=False opts out of the field-wise __eq__/__hash__ a
+    frozen dataclass generates by default, which would otherwise compare
+    (and hash) the full `data` field -- reading the entire file on every
+    equality check or hash() call, and still reporting two independently-
+    parsed streams as equal since `data` is the only field capable of
+    comparing equal by value in the first place.
 
     Attributes:
         data: The complete file bytes this AudioStream was parsed from, or
@@ -639,7 +1044,13 @@ class AudioStream:
             tag, in samples at the stream's own sample rate — informational
             only. Real players stop this many samples early, but split
             output is fresh audio with no padding semantics to carry over.
-        sample_rate: Audio sample rate in Hz (e.g. 44100, 48000).
+        sample_rate: Audio sample rate in Hz (e.g. 44100, 48000), read
+            from the first frame's own header only. A stream with a
+            genuinely mixed sample rate across frames (rare, but legal
+            per the MPEG spec) isn't specially detected or handled --
+            this always reflects the first frame, and later frames at a
+            different rate are parsed and split normally but don't
+            change what this attribute reports.
     """
 
     data: bytes | mmap.mmap
@@ -647,7 +1058,9 @@ class AudioStream:
     encoder_delay_samples: int
     encoder_padding_samples: int
     sample_rate: int
-    _file: BufferedReader | None = field(default=None, repr=False, compare=False)
+    # compare=False would be inert here: the class is eq=False, so no
+    # __eq__/__hash__ is generated at all for any field to participate in.
+    _file: BufferedReader | None = field(default=None, repr=False)
 
     @property
     def duration_ms(self) -> float:
@@ -678,7 +1091,7 @@ class AudioStream:
         self.close()
 
 
-def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
+def load_audio_stream(path: Path | str, *, use_mmap: bool = False) -> AudioStream:
     """Load an MP3 file and parse all its frames for frame-accurate splitting.
 
     Opens and reads the file, scans it for MPEG Layer III frames (skipping
@@ -694,7 +1107,8 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
     the whole thing in RAM just to locate frame boundaries.
 
     Args:
-        path: Path to an MP3 file on disk.
+        path: Path to an MP3 file on disk. A str is accepted too, coerced
+            to a Path immediately via Path(path).
         use_mmap: If True, memory-map the file instead of reading it into a
             bytes object. AudioStream.data is then an mmap.mmap rather than
             bytes -- scan_frames/slice_bytes/etc. work identically either
@@ -706,7 +1120,7 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
             when done, or use the AudioStream as a context manager
             (`with load_audio_stream(path, use_mmap=True) as stream:`).
             Governed by a separate, larger size cap than the default path
-            (2 GB vs. 250 MB) -- see FileTooLargeError below. Not modifying
+            (2 GiB vs. 250 MiB) -- see FileTooLargeError below. Not modifying
             or deleting the file on disk while an AudioStream from this
             mode is open: on POSIX, deleting it is safe (the mapping keeps
             working via the file's inode), but modifying it in place is not
@@ -727,18 +1141,42 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
             real audio data after it, or (use_mmap=True only) the file is
             empty -- matching the same error the default path raises for
             an empty file, rather than a platform-specific mmap ValueError.
+            Also raised if `path` isn't a regular file (a symlink to one is
+            fine, but a FIFO, character device, directory, or socket is
+            rejected before anything is read from it) -- st_size is 0 for
+            most of these, which would otherwise bypass the size limit
+            below entirely.
         FileTooLargeError: The file exceeds the applicable size limit --
-            250 MB by default, or 2 GB with use_mmap=True. Checked against
+            250 MiB by default, or 2 GiB with use_mmap=True. Checked against
             the file's size on disk before opening it, so an oversized file
             is never read or mapped in the first place. See SECURITY.md.
         FileNotFoundError: The file at `path` does not exist.
     """
+    path = Path(path)
+    if path.exists() and not path.is_file():
+        # stat().st_size is 0 for character devices, FIFOs, and most of
+        # procfs -- reading past this point would bypass the size cap
+        # below entirely, since there'd be nothing to compare against
+        # (a FIFO with no writer hangs load_audio_stream forever; a
+        # character device like /dev/zero produces unbounded output).
+        # is_file() follows symlinks (a symlink to a real file is fine)
+        # but returns False for anything that isn't ultimately a regular
+        # file, which is exactly what needs rejecting here. Guarded by
+        # exists() first so a genuinely missing path still raises
+        # FileNotFoundError below, not this.
+        raise UnsupportedMp3Error(f"{path} is not a regular file.")
     file_size = path.stat().st_size
     max_size = _MAX_MMAP_FILE_SIZE_BYTES if use_mmap else _MAX_FILE_SIZE_BYTES
     if file_size > max_size:
-        mib_per_gib = 1024
-        limit_mb = max_size / (1024 * 1024)
-        limit_str = f"{limit_mb / mib_per_gib:.0f} GB" if limit_mb >= mib_per_gib else f"{limit_mb:.0f} MB"
+        # N6: the caps below are binary (250 * 1024**2, 2 * 1024**3) --
+        # MiB/GiB, not decimal MB/GB. This message used to say "MB"/"GB"
+        # for the same values other comments in this file correctly
+        # labeled MiB/GiB, an internal inconsistency found by a fresh
+        # adversarial code review.
+        limit_mib = max_size / (1024 * 1024)
+        limit_str = (
+            f"{limit_mib / _MIB_PER_GIB:.0f} GiB" if limit_mib >= _MIB_PER_GIB else f"{limit_mib:.0f} MiB"
+        )
         raise FileTooLargeError(
             f"{path} is {file_size} bytes, exceeding the {max_size}-byte ({limit_str}) limit."
         )
@@ -754,22 +1192,47 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
         # Not opened via `with`: this handle is kept open for AudioStream's
         # lifetime and released via AudioStream.close().
         file_handle = path.open("rb")
+        mmap_created = False
         try:
             data = mmap.mmap(file_handle.fileno(), 0, access=mmap.ACCESS_READ)
-        except Exception:
-            file_handle.close()
-            raise
+            mmap_created = True
+        finally:
+            # try/finally rather than except Exception: a KeyboardInterrupt
+            # during mmap.mmap() isn't an Exception subclass, so an except
+            # Exception clause wouldn't run this cleanup and the fd would
+            # leak. finally runs on every exit path except success, where
+            # mmap_created is already True and this is a no-op.
+            if not mmap_created:
+                file_handle.close()
     else:
         data = path.read_bytes()
 
+    # try/finally with a success flag rather than except Exception: same
+    # reasoning as the mmap-creation block above -- a KeyboardInterrupt
+    # during this block isn't an Exception subclass, so except Exception
+    # wouldn't run this cleanup and the fd/mapping would leak. Found by a
+    # fresh adversarial code review.
+    succeeded = False
     try:
         raw_frames = scan_frames(data, max_size=max_size)
         first = raw_frames[0]
-        version, _, sample_rate, _ = _parse_header(data, first.offset)
+        parsed = _parse_header(data, first.offset)
+        if parsed is None:
+            # scan_frames only ever records an offset it already validated
+            # as a real frame header, so re-parsing that same offset can't
+            # actually fail -- this narrows the type for mypy and documents
+            # the invariant, rather than a real runtime possibility. A bare
+            # `assert` is avoided here since this project's ruff config
+            # (bandit S101) flags asserts in non-test code -- they're
+            # stripped under `python -O`, unlike an explicit raise.
+            raise AssertionError("scan_frames already validated this offset as a real frame header")
+        version, _, sample_rate, _ = parsed
         tag_offset = _vbr_header_tag_offset(data, first, version)
 
         if tag_offset is None:
-            return AudioStream(data, raw_frames, 0, 0, sample_rate, _file=file_handle)
+            stream = AudioStream(data, raw_frames, 0, 0, sample_rate, _file=file_handle)
+            succeeded = True
+            return stream
 
         gapless = _parse_lame_gapless(data, first, tag_offset)
         delay, padding = gapless if gapless else (0, 0)
@@ -782,15 +1245,16 @@ def load_audio_stream(path: Path, *, use_mmap: bool = False) -> AudioStream:
         rebased = raw_frames[1:].rebase(first.duration_ms)
         if not rebased:
             raise UnsupportedMp3Error("File contains only a VBR header frame, no audio.")
-        return AudioStream(data, rebased, delay, padding, sample_rate, _file=file_handle)
-    except Exception:
-        if use_mmap:
+        stream = AudioStream(data, rebased, delay, padding, sample_rate, _file=file_handle)
+        succeeded = True
+        return stream
+    finally:
+        if not succeeded and use_mmap:
             data.close()  # type: ignore[union-attr]
             file_handle.close()  # type: ignore[union-attr]
-        raise
 
 
-def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
+def split_at(stream: AudioStream, timestamps_ms: Sequence[float]) -> list[bytes]:
     """Split `stream` into segments at the given cut points.
 
     Convenience wrapper around frame_index_at + slice_bytes for the common
@@ -800,29 +1264,86 @@ def split_at(stream: AudioStream, timestamps_ms: list[float]) -> list[bytes]:
         stream: An AudioStream from load_audio_stream.
         timestamps_ms: Desired cut points, in milliseconds. Need not be
             sorted or in range — each is passed through frame_index_at,
-            which clamps out-of-range values, so an out-of-order or
-            duplicate timestamp simply produces an empty segment at that
-            position rather than raising.
+            which clamps out-of-range values, and the resulting frame
+            indices are then sorted, so unsorted input is normalized to
+            ascending cut points rather than producing overlapping (and
+            therefore audio-duplicating) segments. A duplicate timestamp,
+            or two timestamps landing on the same frame, still yields an
+            empty segment between them.
 
     Returns:
-        A list of len(timestamps_ms) + 1 byte segments, in order. Each
+        A list of len(timestamps_ms) + 1 byte segments, in ascending time
+        order. The count only ever depends on how many timestamps were
+        passed — sorting reorders where the cuts land, never how many
+        segments come back — but the segments are ordered by position in
+        the stream, not by the order the timestamps were given in. Each
         segment is a standalone, decodable MP3 stream, byte-identical to
         the corresponding span of stream.data. Concatenating all segments
-        (see join_frames) reproduces the original audio exactly. Each
-        segment is fresh, independent bytes — safe to use even after
-        closing an mmap-backed stream (see AudioStream.close()).
+        (see join_frames) reproduces the original audio exactly, for any
+        input order — safe because MPEG Layer III frames are
+        self-delimited (each carries its own length in its header), so
+        rejoining segment boundaries never needs re-parsing or
+        re-alignment. Not the original file bytes, though: leading ID3v2
+        tags, the VBR header frame, and any trailer aren't carried into
+        split output, so they're absent from a rejoin too. Each segment
+        is fresh, independent bytes — safe to use even after closing an
+        mmap-backed stream (see AudioStream.close()).
     """
-    idxs = [0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)]
+    # Sorted so the pairwise ranges below are non-overlapping: unsorted
+    # indices would pair into ranges that revisit the same frames, and
+    # join_frames on those segments would duplicate audio rather than
+    # reproduce the original. frame_index_at still runs against each
+    # timestamp as given -- only the resulting indices are sorted.
+    idxs = sorted([0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)])
     return [slice_bytes(stream.data, stream.frames, start, end) for start, end in pairwise(idxs)]
 
 
-def join_frames(segments: list[bytes]) -> bytes:
+def split_to_files(stream: AudioStream, timestamps_ms: Sequence[float], output_paths: Sequence[Path]) -> None:
+    """Split `stream` into segments at the given cut points, writing each to disk.
+
+    Same cut-point semantics as split_at (see its docstring for the full
+    explanation of sorting/clamping/duplicate-timestamp behavior), but
+    writes each segment straight to its own output path via
+    Path.write_bytes instead of returning them all as one list[bytes].
+    For a stream loaded with use_mmap=True, this avoids split_at's
+    failure mode of holding every segment (and therefore the whole file)
+    in the Python heap at once -- each segment is written and then
+    eligible for garbage collection before the next one is sliced. Note
+    this is about not accumulating *all* segments at once: each
+    individual segment is still fully materialized as one bytes object
+    by slice_bytes before being written, same as split_at.
+
+    Args:
+        stream: An AudioStream from load_audio_stream.
+        timestamps_ms: Desired cut points, in milliseconds. See split_at's
+            docstring for sorting/clamping/duplicate-timestamp semantics
+            -- identical here.
+        output_paths: One path per output segment, in ascending stream
+            order (not the order timestamps_ms was given in -- same
+            reordering split_at itself applies). Must have exactly
+            len(timestamps_ms) + 1 entries, one per segment split_at
+            would have returned. Existing files at these paths are
+            overwritten.
+
+    Raises:
+        ValueError: len(output_paths) != len(timestamps_ms) + 1.
+    """
+    idxs = sorted([0, *(frame_index_at(stream.frames, t) for t in timestamps_ms), len(stream.frames)])
+    segment_count = len(idxs) - 1
+    if len(output_paths) != segment_count:
+        raise ValueError(
+            f"split_to_files() requires exactly {segment_count} output_paths "
+            f"for {len(timestamps_ms)} timestamps_ms, got {len(output_paths)}"
+        )
+    for (start, end), path in zip(pairwise(idxs), output_paths, strict=True):
+        path.write_bytes(slice_bytes(stream.data, stream.frames, start, end))
+
+
+def join_frames(segments: Sequence[bytes]) -> bytes:
     """Concatenate frame-aligned MP3 byte segments back into one stream.
 
-    MPEG Layer III frames are self-delimited — each one carries its own
-    length in its header — so concatenating segments produced by
-    slice_bytes/split_at is always safe and reproduces the original bytes
-    exactly, with no need to re-parse or re-align anything.
+    b"".join(segments) plus the name: see split_at's docstring for why
+    this is always safe for segments produced by slice_bytes/split_at.
 
     Args:
         segments: Byte segments to join, in order, as produced by

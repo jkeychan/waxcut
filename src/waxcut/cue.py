@@ -1,12 +1,40 @@
 """Parsing for CUE sheet (.cue) text -- pure text, no audio decoding.
 
 Extracts TRACK/INDEX 01 cut-point timestamps for feeding directly into
-waxcut.split_at. See docs/superpowers/plans/2026-08-04-cue-sheet-parsing-plan.md
-for the full design rationale (grammar scope, error-handling rules, worked
-examples) -- kept out of this docstring to avoid duplicating it.
+waxcut.split_at. See parse_cue_sheet's own docstring for the full grammar
+scope and error-handling rules, or the API Reference's parse_cue_sheet
+section (https://waxcut.pages.dev/docs/api-reference#parse_cue_sheet) for a
+worked example.
 """
 
 from __future__ import annotations
+
+import re
+import sys
+
+from waxcut.frames import WaxcutError
+
+# Optional leading "-" is allowed through for all three MM:SS:FF fields (not
+# just minutes -- despite this constant's name, the regex doesn't single
+# minutes out), so a negative value in any of them reaches that field's own
+# dedicated range check below (invalid minutes / seconds must be 0-59 /
+# frame field must be 0-74) instead of being misreported as non-numeric.
+_ASCII_DIGITS_RE = re.compile(r"-?[0-9]+")
+
+# Error messages used to interpolate the raw, attacker-controlled token
+# verbatim (repr'd) -- unbounded, so a pathologically long field produced a
+# message just as long (it's rejected on its own merits too, but only after
+# a message that size has already been built). Used in every message below
+# that would otherwise show the raw token. Found by a fresh adversarial code
+# review.
+_MAX_TOKEN_CHARS_IN_MESSAGE = 60
+
+
+def _truncated_repr(token: str) -> str:
+    if len(token) <= _MAX_TOKEN_CHARS_IN_MESSAGE:
+        return repr(token)
+    return f"{token[:_MAX_TOKEN_CHARS_IN_MESSAGE]!r}...({len(token)} chars total)"
+
 
 _CD_FRAMES_PER_SECOND = 75
 _SECONDS_PER_MINUTE = 60
@@ -14,16 +42,18 @@ _MS_PER_SECOND = 1000
 _MSF_FIELDS = 3  # MM:SS:FF has exactly 3 fields
 _MAX_SECONDS_FIELD = 60  # exclusive upper bound: valid range is 0-59
 _MAX_FRAME_FIELD = _CD_FRAMES_PER_SECOND  # exclusive upper bound: valid range is 0-74
-_MAX_MINUTES_FIELD = 1_000_000  # inclusive upper bound: keeps the ms conversion within float range
+_MAX_MINUTES_FIELD = 1_000_000  # inclusive upper bound: a sanity cap, ~1.9 years of audio
 
 
-class CueSheetError(ValueError):
+class CueSheetError(WaxcutError):
     """Raised when cue-sheet text can't be parsed into cut-point timestamps.
 
     Covers malformed MM:SS:FF timestamps, a TRACK with no INDEX 01, cue
     text with no audio tracks at all, out-of-order INDEX 01 timestamps,
     and multi-FILE cue sheets (unsupported -- see the parse_cue_sheet
-    docstring). Always raised with a message naming the offending line.
+    docstring). Always raised with a message naming the offending line,
+    except the no-audio-tracks-found case: with nothing found in the
+    whole text, there's no single offending line to name.
     """
 
 
@@ -47,31 +77,50 @@ def _parse_msf(token: str, lineno: int) -> float:
             exceeds `_MAX_MINUTES_FIELD`, seconds is outside 0-59, or
             the frame field is outside 0-74.
     """
+    token_repr = _truncated_repr(token)
     fields = token.split(":")
     if len(fields) != _MSF_FIELDS:
-        raise CueSheetError(f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF)")
+        raise CueSheetError(f"line {lineno}: malformed timestamp {token_repr} (expected MM:SS:FF)")
+    # int() is more lenient than "base-10 integer" suggests: it accepts PEP
+    # 515 underscores ("0_1"), a leading "+", and non-ASCII decimal digits
+    # (e.g. Arabic-Indic). Require plain ASCII 0-9 before trusting int().
+    if not all(_ASCII_DIGITS_RE.fullmatch(field) for field in fields):
+        raise CueSheetError(
+            f"line {lineno}: malformed timestamp {token_repr} (expected MM:SS:FF, all fields numeric)"
+        )
+    # A field with more digits than int() is willing to convert (default
+    # 4300, since Python 3.11) would otherwise raise its own ValueError,
+    # caught below and misreported as "not numeric" -- checked ahead of
+    # time so a too-long field gets its own, honest message instead. No
+    # legitimate MSF field is anywhere near this long, so nothing valid
+    # is rejected here.
+    int_digit_limit = sys.get_int_max_str_digits()
+    if int_digit_limit and any(len(field.lstrip("-")) > int_digit_limit for field in fields):
+        raise CueSheetError(
+            f"line {lineno}: malformed timestamp {token_repr} (a field exceeds {int_digit_limit} digits)"
+        )
     try:
         minutes, seconds, frames = (int(field) for field in fields)
     except ValueError:
         raise CueSheetError(
-            f"line {lineno}: malformed timestamp {token!r} (expected MM:SS:FF, all fields numeric)"
+            f"line {lineno}: malformed timestamp {token_repr} (expected MM:SS:FF, all fields numeric)"
         ) from None
     if not (0 <= minutes <= _MAX_MINUTES_FIELD):
         raise CueSheetError(
-            f"line {lineno}: {token!r} has an invalid minutes field (must be 0-{_MAX_MINUTES_FIELD})"
+            f"line {lineno}: {token_repr} has an invalid minutes field (must be 0-{_MAX_MINUTES_FIELD})"
         )
     if not (0 <= seconds < _MAX_SECONDS_FIELD):
-        raise CueSheetError(f"line {lineno}: {token!r} out of range (seconds must be 0-59)")
+        raise CueSheetError(f"line {lineno}: {token_repr} out of range (seconds must be 0-59)")
     if not (0 <= frames < _MAX_FRAME_FIELD):
         raise CueSheetError(
-            f"line {lineno}: {token!r} out of range (frame field must be 0-74 at 75 frames/sec)"
+            f"line {lineno}: {token_repr} out of range (frame field must be 0-74 at 75 frames/sec)"
         )
     total_seconds = minutes * _SECONDS_PER_MINUTE + seconds
     return total_seconds * _MS_PER_SECOND + frames * _MS_PER_SECOND / _CD_FRAMES_PER_SECOND
 
 
 _AUDIO_TRACK_TYPE = "AUDIO"
-_TARGET_INDEX_NUMBER = "01"
+_TARGET_INDEX_NUMBER = 1
 _TRACK_LINE_MIN_FIELDS = 3  # TRACK <number> <type>
 _INDEX_LINE_MIN_FIELDS = 3  # INDEX <number> <MM:SS:FF>
 
@@ -80,14 +129,27 @@ def _handle_track_line(line: str) -> tuple[str, bool]:
     """Parse a TRACK line; return (track_number, is_audio_track)."""
     parts = line.split()
     track_number = parts[1] if len(parts) > 1 else "?"
-    is_audio = parts[-1].upper() == _AUDIO_TRACK_TYPE if len(parts) >= _TRACK_LINE_MIN_FIELDS else False
+    is_audio = parts[2].upper() == _AUDIO_TRACK_TYPE if len(parts) >= _TRACK_LINE_MIN_FIELDS else False
     return track_number, is_audio
 
 
 def _handle_index_line(line: str, lineno: int) -> float | None:
     """Parse an INDEX line; return its ms value if it's INDEX 01, else None."""
     parts = line.split()
-    if len(parts) < _INDEX_LINE_MIN_FIELDS or parts[1] != _TARGET_INDEX_NUMBER:
+    if len(parts) < _INDEX_LINE_MIN_FIELDS:
+        return None
+    # Compare numerically, not as an exact "01" string match: real-world
+    # cue sheets from tools like cdrdao and hand-written sheets emit
+    # unpadded index numbers ("INDEX 1"), and rejecting those as "not
+    # INDEX 01" silently dropped the cut point instead of recognizing it.
+    # A non-numeric index number (malformed input) just means this isn't
+    # the target index either -- same as any other non-match. Found by a
+    # fresh adversarial code review.
+    try:
+        index_number = int(parts[1])
+    except ValueError:
+        return None
+    if index_number != _TARGET_INDEX_NUMBER:
         return None
     return _parse_msf(parts[2], lineno)
 
@@ -126,39 +188,71 @@ def parse_cue_sheet(text: str) -> list[float]:
             isn't valid MM:SS:FF (wrong field count, non-numeric fields,
             seconds outside 0-59, or the CD frame field outside 0-74 at
             75 frames/second); an AUDIO track's block ends without ever
-            recording its own INDEX 01; or a later INDEX 01 timestamp is
-            strictly less than the one before it (equal, i.e. duplicate,
-            timestamps are allowed -- split_at already documents that a
-            duplicate timestamp simply yields an empty segment).
+            recording its own INDEX 01; a single AUDIO track has more than
+            one INDEX 01 entry; or a later INDEX 01 timestamp is strictly
+            less than the one before it (equal, i.e. duplicate, timestamps
+            are allowed -- split_at already documents that a duplicate
+            timestamp simply yields an empty segment).
     """
+    # A leading BOM survives decoding when a caller uses "utf-8" instead of
+    # "utf-8-sig" -- common with real-world .cue files from EAC and other
+    # rippers. Strip it so it can't defeat the FILE/TRACK keyword dispatch
+    # below (a BOM'd first line would otherwise fail the FILE/TRACK match
+    # entirely and silently drop that line's data). Looped, not a single
+    # removeprefix() call: a real artifact of tools that decode with
+    # "utf-8" and re-encode with "utf-8-sig" is a double BOM, which a
+    # single strip leaves one copy of -- still enough to defeat the
+    # dispatch below, just as effectively as the first. Found by a fresh
+    # adversarial code review.
+    while text.startswith("﻿"):
+        text = text.removeprefix("﻿")
+
     timestamps: list[float] = []
     seen_file = False
     in_audio_track = False
     current_track_number = "?"
+    current_track_lineno = 0
     have_index01_for_current_track = False
-    lineno = 0
 
-    def _check_track_closed(lineno: int) -> None:
+    def _check_track_closed() -> None:
         if in_audio_track and not have_index01_for_current_track:
-            raise CueSheetError(f"line {lineno}: TRACK {current_track_number} has no INDEX 01")
+            raise CueSheetError(f"line {current_track_lineno}: TRACK {current_track_number} has no INDEX 01")
 
-    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+    # split("\n"), not splitlines(): splitlines() also breaks on a wider
+    # set of Unicode line-separator characters (\x0b, \x0c, \x1c-\x1e,
+    # U+0085, U+2028, U+2029, ...) that can legitimately appear inside a
+    # field's text on this line-oriented, ASCII-ish format -- e.g. a
+    # keyword line with a stray \x0b splitting into two lines and getting
+    # silently misrecognized. \r\n is still handled correctly: the
+    # trailing \r left on each line is whitespace, stripped by line.strip()
+    # a few lines below. Found by a fresh adversarial code review.
+    for lineno, raw_line in enumerate(text.split("\n"), start=1):
         line = raw_line.strip()
         if not line:
             continue
-        upper = line.upper()
+        # Compare the first whitespace-delimited token rather than prefix-
+        # matching a literal space after the keyword: str.split() collapses
+        # tabs, NBSP, and other whitespace runs for free, so a line like
+        # "TRACK\t01\tAUDIO" is recognized instead of silently falling
+        # through as an unrecognized line.
+        keyword = line.split()[0].upper()
 
-        if upper.startswith("FILE "):
+        if keyword == "FILE":
             if seen_file:
                 raise CueSheetError(f"line {lineno}: multi-FILE cue sheets are not supported")
             seen_file = True
-        elif upper.startswith("TRACK "):
-            _check_track_closed(lineno)
+        elif keyword == "TRACK":
+            _check_track_closed()
             current_track_number, in_audio_track = _handle_track_line(line)
+            current_track_lineno = lineno
             have_index01_for_current_track = False
-        elif upper.startswith("INDEX ") and in_audio_track:
+        elif keyword == "INDEX" and in_audio_track:
             ms = _handle_index_line(line, lineno)
             if ms is not None:
+                if have_index01_for_current_track:
+                    raise CueSheetError(
+                        f"line {lineno}: TRACK {current_track_number} has more than one INDEX 01"
+                    )
                 if timestamps and ms < timestamps[-1]:
                     raise CueSheetError(
                         f"line {lineno}: INDEX 01 timestamps are not increasing "
@@ -170,7 +264,7 @@ def parse_cue_sheet(text: str) -> list[float]:
         # PREGAP/POSTGAP, and INDEX lines outside an AUDIO track, or with
         # an index number other than 01 -- all intentionally ignored.
 
-    _check_track_closed(lineno=lineno)
+    _check_track_closed()
 
     if not timestamps:
         raise CueSheetError("no audio TRACK/INDEX 01 entries found in cue sheet text")

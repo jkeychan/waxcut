@@ -41,10 +41,26 @@ CI/pytest) for changes that touch the parsing hot path:
 uv run python bench/benchmark.py
 ```
 
+## Documentation
+
+A change to the public API (anything in `waxcut.__all__`) needs a matching
+update to [`README.md`](README.md) and
+[`site/docs/api-reference.md`](site/docs/api-reference.md) — new
+functions/classes, changed signatures, or changed exception behavior should
+all be reflected there, not just in code docstrings. The
+[`site.yml`](.github/workflows/site.yml) workflow builds the Docusaurus site
+on every PR touching `site/**`, and fails the build on a broken internal
+link (`onBrokenLinks: 'throw'`), so a docs change that breaks a cross-link
+is caught before merge.
+
 ## Pull request process
 
 - Fork the repo, branch from `main`, open a PR against `main`.
-- CI (tests across Python 3.10–3.14, lint, CodeQL, fuzzing) must pass.
+- CI must pass: tests across Python 3.10–3.14, lint, CodeQL, and the
+  `actionlint`/`zizmor`/`ratchet` workflow-security checks run on every PR
+  regardless of what changed. ClusterFuzzLite PR fuzzing only runs when a
+  PR touches `src/**` or `.clusterfuzzlite/**` — it's not part of every
+  PR's CI run.
 - PRs require an approving review before merge — for external contributions
   this means a maintainer review.
 

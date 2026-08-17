@@ -1,0 +1,42 @@
+name: Site build
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "site/**"
+      - ".github/workflows/site.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "site/**"
+      - ".github/workflows/site.yml"
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: site/.node-version
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build
+        working-directory: site
+        run: npm run build
