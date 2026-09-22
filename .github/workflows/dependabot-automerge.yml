@@ -1,7 +1,13 @@
 name: Dependabot Auto-Merge
 
 on:
-  pull_request:
+  # pull_request_target is required here: a plain `pull_request` run
+  # triggered by dependabot's push only gets secrets from the Dependabot
+  # secrets store, not this repo's Actions secrets, so DEPENDABOT_MERGE_PAT
+  # comes through empty. This workflow never checks out the PR head or runs
+  # any code from the diff, so it doesn't have the injection exposure
+  # dangerous-triggers normally warns about.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] no checkout of PR head, only metadata read + gh CLI calls
     branches: [ main ]
 
 permissions: {}
